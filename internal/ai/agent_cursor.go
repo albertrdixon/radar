@@ -35,10 +35,14 @@ import (
 type cursorAgent struct {
 	bin string
 
+	probeTimeout time.Duration // zero = defaultCursorProbeTimeout
+
 	trustMu    sync.Mutex
 	trustKnown bool
 	trustArg   string // resolved workspace-trust flag: "--trust" | "--force" | ""
 }
+
+const defaultCursorProbeTimeout = 5 * time.Second
 
 func (a *cursorAgent) Name() string { return "cursor-agent" }
 
@@ -122,7 +126,11 @@ func (a *cursorAgent) resolveTrustFlag() (string, error) {
 		}
 		return a.trustArg, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	timeout := a.probeTimeout
+	if timeout <= 0 {
+		timeout = defaultCursorProbeTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	out, _ := exec.CommandContext(ctx, a.bin, "--help").CombinedOutput()
 	if ctx.Err() != nil {

@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeCursorShim writes a fake cursor-agent that mimics a Cursor release where
@@ -52,7 +53,9 @@ exit 0
 // run stuck at the workspace-trust gate. command() must probe --help, fall back to
 // --force, and the spawned run must clear the gate and produce stream-json.
 func TestCursorTrustFallbackEndToEnd(t *testing.T) {
-	a := &cursorAgent{bin: writeCursorShim(t)}
+	// Generous probe deadline: a saturated CI box can take seconds just to fork
+	// the shim, and this test is about the flag fallback, not the timeout.
+	a := &cursorAgent{bin: writeCursorShim(t), probeTimeout: time.Minute}
 	cmd, cleanup, err := a.command(context.Background(), turnSpec{
 		mcpURL: "http://localhost:9/mcp-readonly", prompt: "investigate",
 		workdir: t.TempDir(), profile: ExecutionProfileFullLocal,
