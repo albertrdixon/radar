@@ -427,6 +427,30 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 				},
 			})
 
+			for _, run := range activeAnalysisRuns(status) {
+				runID := fmt.Sprintf("analysisrun/%s/%s", ns, run.name)
+				nodes = append(nodes, Node{
+					ID:     runID,
+					Kind:   "AnalysisRun",
+					Name:   run.name,
+					Status: analysisRunHealth(run.phase),
+					Data: map[string]any{
+						"namespace":  ns,
+						"phase":      run.phase,
+						"trigger":    run.trigger,
+						"message":    run.message,
+						"apiVersion": rollout.GetAPIVersion(),
+					},
+				})
+				edges = append(edges, Edge{
+					ID:     fmt.Sprintf("%s-to-%s", rolloutID, runID),
+					Source: rolloutID,
+					Target: runID,
+					Type:   EdgeManages,
+					Label:  run.trigger,
+				})
+			}
+
 			// Extract pod template spec for config references
 			template, _, _ := unstructured.NestedMap(spec, "template", "spec")
 			if template != nil {
@@ -7344,6 +7368,52 @@ func getDeploymentStatus(ready, total int32) HealthStatus {
 	return StatusUnhealthy
 }
 
+type rolloutAnalysisRunRef struct {
+	name    string
+	phase   string
+	message string
+	trigger string
+}
+
+// Only the runs the Rollout's own status points at — every historical
+// AnalysisRun would grow the graph without bound.
+func activeAnalysisRuns(status map[string]any) []rolloutAnalysisRunRef {
+	sources := []struct {
+		trigger string
+		path    []string
+	}{
+		{"step", []string{"canary", "currentStepAnalysisRunStatus"}},
+		{"background", []string{"canary", "currentBackgroundAnalysisRunStatus"}},
+		{"pre-promotion", []string{"blueGreen", "prePromotionAnalysisRunStatus"}},
+		{"post-promotion", []string{"blueGreen", "postPromotionAnalysisRunStatus"}},
+	}
+
+	runs := make([]rolloutAnalysisRunRef, 0, len(sources))
+	for _, source := range sources {
+		name, found, _ := unstructured.NestedString(status, append(source.path, "name")...)
+		if !found || name == "" {
+			continue
+		}
+		phase, _, _ := unstructured.NestedString(status, append(source.path, "status")...)
+		message, _, _ := unstructured.NestedString(status, append(source.path, "message")...)
+		runs = append(runs, rolloutAnalysisRunRef{name: name, phase: phase, message: message, trigger: source.trigger})
+	}
+	return runs
+}
+
+func analysisRunHealth(phase string) HealthStatus {
+	switch phase {
+	case "Successful":
+		return StatusHealthy
+	case "Running", "Pending", "Inconclusive":
+		return StatusDegraded
+	case "Failed", "Error":
+		return StatusUnhealthy
+	default:
+		return StatusUnknown
+	}
+}
+
 func getJobStatus(job *batchv1.Job) HealthStatus {
 	return healthLevelToStatus(health.Workload(job, time.Now()).Level)
 }
@@ -8164,6 +8234,56 @@ func extractCAPIReadyConditionStatus(obj unstructured.Unstructured) HealthStatus
 	return StatusUnknown
 }
 
+// Kinds with a dedicated node builder, or deliberately kept out of the graph.
+// addGenericCRDNodes copies this and adds discovered NodeClass kinds per build.
+var kindsHandledOutsideGenericCRDPass = map[string]bool{
+	// analysisrun: graphed by activeAnalysisRuns, current runs only
+	"analysisrun": true,
+	"rollout":     true, "application": true, "kustomization": true,
+	"helmrelease": true, "gitrepository": true, "certificate": true,
+	"gateway": true, "httproute": true, "grpcroute": true, "tcproute": true, "tlsroute": true,
+	"nodepool": true, "nodeclaim": true, // Karpenter
+	"ec2nodeclass": true, "aksnodeclass": true, "gcenodeclass": true, // Karpenter NodeClass
+	"scaledobject": true, "scaledjob": true, // KEDA
+	"workflowtemplate": true, "clusterworkflowtemplate": true, // Argo Workflows
+	"gatewayclass":   true,                                                // Gateway API
+	"virtualservice": true, "destinationrule": true, "serviceentry": true, // Istio networking
+	"peerauthentication": true, "authorizationpolicy": true, // Istio security
+	"knativeservice": true, "configuration": true, "revision": true, "route": true, // KNative Serving
+	"domainmapping": true, "serverlessservice": true, // KNative Serving (internal)
+	"broker": true, "trigger": true, "eventtype": true, // KNative Eventing
+	"channel": true, "inmemorychannel": true, "subscription": true, // KNative Messaging
+	"apiserversource": true, "containersource": true, "pingsource": true, "sinkbinding": true, // KNative Sources
+	"sequence": true, "parallel": true, // KNative Flows
+	"ingressroute": true, "ingressroutetcp": true, "ingressrouteudp": true, // Traefik routing
+	"middleware": true, "middlewaretcp": true, // Traefik middleware
+	"traefikservice":   true,                              // Traefik service
+	"serverstransport": true, "serverstransporttcp": true, // Traefik transport
+	"tlsoption": true, "tlsstore": true, // Traefik TLS
+	"httpproxy":    true,                                                // Contour
+	"clusterclass": true,                                                // Cluster API
+	"machine":      true, "machineset": true, "machinedeployment": true, // Cluster API
+	"machinepool": true, "kubeadmcontrolplane": true, "machinehealthcheck": true, // Cluster API
+	"machinedrainrule": true, // Cluster API
+	// Trivy Operator reports - high cardinality, excluded from topology
+	"vulnerabilityreport": true, "configauditreport": true,
+	"exposedsecretreport": true, "sbomreport": true,
+	"rbacassessmentreport": true, "clusterrbacassessmentreport": true,
+	"clustercompliancereport": true, "clustersbomreport": true,
+	"infraassessmentreport": true, "clusterinfraassessmentreport": true,
+	// Core types handled by typed informers
+	"deployment": true, "daemonset": true, "statefulset": true,
+	"replicaset": true, "pod": true, "service": true, "ingress": true,
+	"job": true, "cronjob": true, "configmap": true, "secret": true,
+	"serviceaccount": true, "sealedsecret": true,
+	"servicemonitor": true, "podmonitor": true,
+	"persistentvolumeclaim": true, "horizontalpodautoscaler": true,
+	// Argo Workflows handled explicitly above
+	"workflow": true, "cronworkflow": true,
+	// Also skip namespace (not typically owned)
+	"namespace": true,
+}
+
 // addGenericCRDNodes adds CRD nodes connected to the topology via owner references.
 // It uses two-phase resolution: first collecting all candidate CRD resources, then
 // iteratively adding nodes whose owners are already in the topology. This handles
@@ -8183,50 +8303,9 @@ func (b *Builder) addGenericCRDNodes(nodes []Node, edges []Edge, opts BuildOptio
 	}
 
 	// Skip kinds handled explicitly by buildResourcesTopology or excluded from topology entirely
-	processedKinds := map[string]bool{
-		"rollout": true, "application": true, "kustomization": true,
-		"helmrelease": true, "gitrepository": true, "certificate": true,
-		"gateway": true, "httproute": true, "grpcroute": true, "tcproute": true, "tlsroute": true,
-		"nodepool": true, "nodeclaim": true, // Karpenter
-		"ec2nodeclass": true, "aksnodeclass": true, "gcenodeclass": true, // Karpenter NodeClass
-		"scaledobject": true, "scaledjob": true, // KEDA
-		"workflowtemplate": true, "clusterworkflowtemplate": true, // Argo Workflows
-		"gatewayclass":   true,                                                // Gateway API
-		"virtualservice": true, "destinationrule": true, "serviceentry": true, // Istio networking
-		"peerauthentication": true, "authorizationpolicy": true, // Istio security
-		"knativeservice": true, "configuration": true, "revision": true, "route": true, // KNative Serving
-		"domainmapping": true, "serverlessservice": true, // KNative Serving (internal)
-		"broker": true, "trigger": true, "eventtype": true, // KNative Eventing
-		"channel": true, "inmemorychannel": true, "subscription": true, // KNative Messaging
-		"apiserversource": true, "containersource": true, "pingsource": true, "sinkbinding": true, // KNative Sources
-		"sequence": true, "parallel": true, // KNative Flows
-		"ingressroute": true, "ingressroutetcp": true, "ingressrouteudp": true, // Traefik routing
-		"middleware": true, "middlewaretcp": true, // Traefik middleware
-		"traefikservice":   true,                              // Traefik service
-		"serverstransport": true, "serverstransporttcp": true, // Traefik transport
-		"tlsoption": true, "tlsstore": true, // Traefik TLS
-		"httpproxy":    true,                                                // Contour
-		"clusterclass": true,                                                // Cluster API
-		"machine":      true, "machineset": true, "machinedeployment": true, // Cluster API
-		"machinepool": true, "kubeadmcontrolplane": true, "machinehealthcheck": true, // Cluster API
-		"machinedrainrule": true, // Cluster API
-		// Trivy Operator reports - high cardinality, excluded from topology
-		"vulnerabilityreport": true, "configauditreport": true,
-		"exposedsecretreport": true, "sbomreport": true,
-		"rbacassessmentreport": true, "clusterrbacassessmentreport": true,
-		"clustercompliancereport": true, "clustersbomreport": true,
-		"infraassessmentreport": true, "clusterinfraassessmentreport": true,
-		// Core types handled by typed informers
-		"deployment": true, "daemonset": true, "statefulset": true,
-		"replicaset": true, "pod": true, "service": true, "ingress": true,
-		"job": true, "cronjob": true, "configmap": true, "secret": true,
-		"serviceaccount": true, "sealedsecret": true,
-		"servicemonitor": true, "podmonitor": true,
-		"persistentvolumeclaim": true, "horizontalpodautoscaler": true,
-		// Argo Workflows handled explicitly above
-		"workflow": true, "cronworkflow": true,
-		// Also skip namespace (not typically owned)
-		"namespace": true,
+	processedKinds := make(map[string]bool, len(kindsHandledOutsideGenericCRDPass))
+	for kind := range kindsHandledOutsideGenericCRDPass {
+		processedKinds[kind] = true
 	}
 	for _, node := range nodes {
 		if node.Kind != KindNodeClass {

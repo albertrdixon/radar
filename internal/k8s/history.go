@@ -72,6 +72,7 @@ var diffFunctions = map[string]kindDiffFunc{
 	"LimitRange":                     diffLimitRange,
 	"MutatingWebhookConfiguration":   diffAdmissionWebhookConfiguration,
 	"ValidatingWebhookConfiguration": diffAdmissionWebhookConfiguration,
+	"Rollout":                        diffRollout,
 }
 
 // ComputeDiff computes the diff between old and new objects based on kind.
@@ -2407,6 +2408,240 @@ func diffApplication(oldObj, newObj any) ([]FieldChange, []string) {
 	}
 
 	return changes, summary
+}
+
+// Step index, weights, pause conditions and abort/promoteFull all move without
+// phase changing — uncovered, those updates drop as no-diff.
+func diffRollout(oldObj, newObj any) ([]FieldChange, []string) {
+	oldRO, ok1 := oldObj.(*unstructured.Unstructured)
+	newRO, ok2 := newObj.(*unstructured.Unstructured)
+	if !ok1 || !ok2 {
+		warnUnstructuredAssertFailed("Rollout", oldObj)
+		return nil, nil
+	}
+
+	var changes []FieldChange
+	var summary []string
+
+	oldStatus, _, _ := unstructured.NestedMap(oldRO.Object, "status")
+	newStatus, _, _ := unstructured.NestedMap(newRO.Object, "status")
+
+	addString := func(path, label, oldVal, newVal string) {
+		if oldVal == newVal {
+			return
+		}
+		changes = append(changes, FieldChange{Path: path, OldValue: oldVal, NewValue: newVal})
+		switch {
+		case oldVal == "":
+			summary = append(summary, fmt.Sprintf("%s: %s", label, newVal))
+		case newVal == "":
+			summary = append(summary, fmt.Sprintf("%s cleared", label))
+		default:
+			summary = append(summary, fmt.Sprintf("%s: %s→%s", label, oldVal, newVal))
+		}
+	}
+
+	oldPhase, _, _ := unstructured.NestedString(oldStatus, "phase")
+	newPhase, _, _ := unstructured.NestedString(newStatus, "phase")
+	addString("status.phase", "phase", oldPhase, newPhase)
+
+	oldMsg, _, _ := unstructured.NestedString(oldStatus, "message")
+	newMsg, _, _ := unstructured.NestedString(newStatus, "message")
+	if oldMsg != newMsg && newMsg != "" {
+		changes = append(changes, FieldChange{Path: "status.message", OldValue: oldMsg, NewValue: newMsg})
+		summary = append(summary, fmt.Sprintf("message: %s", truncateMessage(newMsg)))
+	}
+
+	oldAbort, _, _ := unstructured.NestedBool(oldStatus, "abort")
+	newAbort, _, _ := unstructured.NestedBool(newStatus, "abort")
+	if oldAbort != newAbort {
+		changes = append(changes, FieldChange{Path: "status.abort", OldValue: oldAbort, NewValue: newAbort})
+		if newAbort {
+			summary = append(summary, "aborted — traffic reverted to stable")
+		} else {
+			summary = append(summary, "abort cleared (retried)")
+		}
+	}
+
+	oldPromoteFull, _, _ := unstructured.NestedBool(oldStatus, "promoteFull")
+	newPromoteFull, _, _ := unstructured.NestedBool(newStatus, "promoteFull")
+	if oldPromoteFull != newPromoteFull {
+		changes = append(changes, FieldChange{Path: "status.promoteFull", OldValue: oldPromoteFull, NewValue: newPromoteFull})
+		if newPromoteFull {
+			summary = append(summary, "promoted to full — remaining steps skipped")
+		} else {
+			summary = append(summary, "promoteFull cleared")
+		}
+	}
+
+	oldStep, oldStepFound, _ := unstructured.NestedInt64(oldStatus, "currentStepIndex")
+	newStep, newStepFound, _ := unstructured.NestedInt64(newStatus, "currentStepIndex")
+	if (oldStepFound || newStepFound) && oldStep != newStep {
+		totalSteps, _, _ := unstructured.NestedSlice(newRO.Object, "spec", "strategy", "canary", "steps")
+		changes = append(changes, FieldChange{Path: "status.currentStepIndex", OldValue: oldStep, NewValue: newStep})
+		if len(totalSteps) > 0 {
+			summary = append(summary, fmt.Sprintf("step %d/%d", newStep, len(totalSteps)))
+		} else {
+			summary = append(summary, fmt.Sprintf("step: %d→%d", oldStep, newStep))
+		}
+	}
+
+	oldHash, _, _ := unstructured.NestedString(oldStatus, "currentPodHash")
+	newHash, _, _ := unstructured.NestedString(newStatus, "currentPodHash")
+	addString("status.currentPodHash", "pod hash", oldHash, newHash)
+
+	oldStable, _, _ := unstructured.NestedString(oldStatus, "stableRS")
+	newStable, _, _ := unstructured.NestedString(newStatus, "stableRS")
+	addString("status.stableRS", "stable rs", oldStable, newStable)
+
+	oldActive, _, _ := unstructured.NestedString(oldStatus, "blueGreen", "activeSelector")
+	newActive, _, _ := unstructured.NestedString(newStatus, "blueGreen", "activeSelector")
+	addString("status.blueGreen.activeSelector", "active", oldActive, newActive)
+
+	oldPreview, _, _ := unstructured.NestedString(oldStatus, "blueGreen", "previewSelector")
+	newPreview, _, _ := unstructured.NestedString(newStatus, "blueGreen", "previewSelector")
+	addString("status.blueGreen.previewSelector", "preview", oldPreview, newPreview)
+
+	for _, side := range []string{"canary", "stable"} {
+		oldWeight, oldFound, _ := unstructured.NestedInt64(oldStatus, "canary", "weights", side, "weight")
+		newWeight, newFound, _ := unstructured.NestedInt64(newStatus, "canary", "weights", side, "weight")
+		if (oldFound || newFound) && oldWeight != newWeight {
+			changes = append(changes, FieldChange{
+				Path:     fmt.Sprintf("status.canary.weights.%s.weight", side),
+				OldValue: oldWeight,
+				NewValue: newWeight,
+			})
+			summary = append(summary, fmt.Sprintf("%s weight: %d%%→%d%%", side, oldWeight, newWeight))
+		}
+	}
+
+	oldPauses := rolloutPauseReasons(oldStatus)
+	newPauses := rolloutPauseReasons(newStatus)
+	if !equalStringSlices(oldPauses, newPauses) {
+		changes = append(changes, FieldChange{Path: "status.pauseConditions", OldValue: oldPauses, NewValue: newPauses})
+		if len(newPauses) == 0 {
+			summary = append(summary, "pause cleared")
+		} else {
+			summary = append(summary, fmt.Sprintf("paused: %s", strings.Join(newPauses, ", ")))
+		}
+	}
+
+	oldControllerPause, _, _ := unstructured.NestedBool(oldStatus, "controllerPause")
+	newControllerPause, _, _ := unstructured.NestedBool(newStatus, "controllerPause")
+	if oldControllerPause != newControllerPause {
+		changes = append(changes, FieldChange{Path: "status.controllerPause", OldValue: oldControllerPause, NewValue: newControllerPause})
+		if newControllerPause {
+			summary = append(summary, "controller paused")
+		} else {
+			summary = append(summary, "controller pause cleared")
+		}
+	}
+
+	for _, replicaField := range []struct{ field, label string }{
+		{"replicas", "replicas"},
+		{"readyReplicas", "ready"},
+		{"availableReplicas", "available"},
+		{"updatedReplicas", "updated"},
+	} {
+		oldCount, oldFound, _ := unstructured.NestedInt64(oldStatus, replicaField.field)
+		newCount, newFound, _ := unstructured.NestedInt64(newStatus, replicaField.field)
+		if (oldFound || newFound) && oldCount != newCount {
+			changes = append(changes, FieldChange{
+				Path:     "status." + replicaField.field,
+				OldValue: oldCount,
+				NewValue: newCount,
+			})
+			summary = append(summary, fmt.Sprintf("%s: %d→%d", replicaField.label, oldCount, newCount))
+		}
+	}
+
+	oldDesired, oldFound, _ := unstructured.NestedInt64(oldRO.Object, "spec", "replicas")
+	newDesired, newFound, _ := unstructured.NestedInt64(newRO.Object, "spec", "replicas")
+	if (oldFound || newFound) && oldDesired != newDesired {
+		changes = append(changes, FieldChange{Path: "spec.replicas", OldValue: oldDesired, NewValue: newDesired})
+		summary = append(summary, fmt.Sprintf("scaled: %d→%d", oldDesired, newDesired))
+	}
+
+	oldPaused, _, _ := unstructured.NestedBool(oldRO.Object, "spec", "paused")
+	newPaused, _, _ := unstructured.NestedBool(newRO.Object, "spec", "paused")
+	if oldPaused != newPaused {
+		changes = append(changes, FieldChange{Path: "spec.paused", OldValue: oldPaused, NewValue: newPaused})
+		if newPaused {
+			summary = append(summary, "spec paused")
+		} else {
+			summary = append(summary, "spec unpaused")
+		}
+	}
+
+	oldRestartAt, _, _ := unstructured.NestedString(oldRO.Object, "spec", "restartAt")
+	newRestartAt, _, _ := unstructured.NestedString(newRO.Object, "spec", "restartAt")
+	if oldRestartAt != newRestartAt && newRestartAt != "" {
+		changes = append(changes, FieldChange{Path: "spec.restartAt", OldValue: oldRestartAt, NewValue: newRestartAt})
+		summary = append(summary, "restart requested")
+	}
+
+	oldImages := rolloutTemplateImages(oldRO)
+	newImages := rolloutTemplateImages(newRO)
+	if !equalStringSlices(oldImages, newImages) {
+		changes = append(changes, FieldChange{Path: "spec.template.spec.containers[].image", OldValue: oldImages, NewValue: newImages})
+		summary = append(summary, fmt.Sprintf("image: %s", strings.Join(newImages, ", ")))
+	}
+
+	oldConds := getConditionMap(oldStatus, "conditions")
+	newConds := getConditionMap(newStatus, "conditions")
+	for condType, newCond := range newConds {
+		if oldConds[condType] != newCond {
+			changes = append(changes, FieldChange{
+				Path:     fmt.Sprintf("status.conditions[%s]", condType),
+				OldValue: oldConds[condType],
+				NewValue: newCond,
+			})
+			summary = append(summary, fmt.Sprintf("%s: %s→%s", condType, oldConds[condType], newCond))
+		}
+	}
+	for condType, oldCond := range oldConds {
+		if _, present := newConds[condType]; !present {
+			changes = append(changes, FieldChange{
+				Path:     fmt.Sprintf("status.conditions[%s]", condType),
+				OldValue: oldCond,
+				NewValue: nil,
+			})
+			summary = append(summary, fmt.Sprintf("%s cleared", condType))
+		}
+	}
+
+	return changes, summary
+}
+
+func rolloutPauseReasons(status map[string]any) []string {
+	conditions, _, _ := unstructured.NestedSlice(status, "pauseConditions")
+	reasons := make([]string, 0, len(conditions))
+	for _, raw := range conditions {
+		condition, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if reason, ok := condition["reason"].(string); ok && reason != "" {
+			reasons = append(reasons, reason)
+		}
+	}
+	sort.Strings(reasons)
+	return reasons
+}
+
+func rolloutTemplateImages(ro *unstructured.Unstructured) []string {
+	containers, _, _ := unstructured.NestedSlice(ro.Object, "spec", "template", "spec", "containers")
+	images := make([]string, 0, len(containers))
+	for _, raw := range containers {
+		container, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if image, ok := container["image"].(string); ok && image != "" {
+			images = append(images, image)
+		}
+	}
+	return images
 }
 
 // truncateRevision truncates a git revision to first 7 chars (short SHA)

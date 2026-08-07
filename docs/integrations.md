@@ -564,6 +564,20 @@ See the main [README](../README.md#gitops) for the user-facing overview. This se
 | CRD | Group | Topology | Detail View | AI Summary |
 |-----|-------|----------|-------------|------------|
 | Rollout | `argoproj.io/v1alpha1` | Yes | Yes | Yes |
+| AnalysisRun | `argoproj.io/v1alpha1` | Yes | Yes | Yes |
+| AnalysisTemplate | `argoproj.io/v1alpha1` | — | Generic | — |
+| ClusterAnalysisTemplate | `argoproj.io/v1alpha1` | — | Generic | — |
+| Experiment | `argoproj.io/v1alpha1` | — | Generic | — |
+
+### What Radar Shows
+
+**Control surface:** Promote, Promote full, Skip step, Retry, and Abort on the Rollout detail page, each gated on a live capability probe (`patch rollouts` and `patch rollouts/status` are separate grants). Rollback goes through revision history, with an opt-in "skip canary steps" follow-up for hotfixes.
+
+**Why it's stuck:** `InconclusiveAnalysisRun` names nothing on its own, so Radar resolves the AnalysisRun the controller recorded and surfaces the deciding metric — its success/failure condition, latest measured value, and message. The same verdict reaches AI agents through the Rollout's `issue` field.
+
+**Topology:** Rollout → active AnalysisRun (`uses`), labelled by trigger (step / background / pre-promotion / post-promotion). Only the runs the Rollout's status points at are graphed — historical runs would grow the graph without bound.
+
+**Timeline:** Step index, traffic weights, pause conditions, abort/promote-full, and stable-ReplicaSet moves are all recorded as distinct events; a Rollout sits in `Progressing` for the whole canary, so phase alone would show nothing.
 
 ---
 

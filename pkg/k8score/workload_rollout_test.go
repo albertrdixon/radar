@@ -103,8 +103,6 @@ func lastPatchBody(t *testing.T, client *dynamicfake.FakeDynamicClient) map[stri
 	return nil
 }
 
-// Restarting a Rollout via the Deployment idiom (bumping a pod-template
-// annotation) would change the template hash and re-run every canary step.
 func TestRestartWorkload_RolloutUsesRestartAt(t *testing.T) {
 	client := newFakeRolloutClient(t, rolloutObject("prod", "web", "web:v1", nil))
 	m := NewWorkloadManager(client, nil)
