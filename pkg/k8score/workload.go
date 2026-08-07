@@ -18,6 +18,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/yaml"
+
+	"github.com/skyhook-io/radar/pkg/rollouts"
 )
 
 // WorkloadRevision represents a single revision in a workload's rollout history.
@@ -28,6 +30,10 @@ type WorkloadRevision struct {
 	IsCurrent bool      `json:"isCurrent"`
 	Replicas  int64     `json:"replicas"`
 	Template  string    `json:"template,omitempty"` // Pod template spec as YAML (for revision diff)
+	// Rollouts only: mid-canary IsCurrent (rolling out) and IsStable (serving
+	// traffic, what an abort reverts to) are different revisions.
+	IsStable bool   `json:"isStable,omitempty"`
+	PodHash  string `json:"podHash,omitempty"`
 }
 
 // UpdateResourceOptions contains options for updating a resource.
@@ -740,6 +746,13 @@ func (m *WorkloadManager) RestartWorkload(ctx context.Context, kind, namespace, 
 	if m.dynClient == nil {
 		return fmt.Errorf("dynamic client not initialized")
 	}
+	// A Rollout's restart is spec.restartAt; the pod-template annotation below
+	// would change the template hash and re-run every canary step instead.
+	if NormalizeWorkloadKind(kind) == "rollouts" {
+		_, err := rollouts.Restart(ctx, m.dynClient, namespace, name)
+		return err
+	}
+
 	if m.discovery == nil {
 		return fmt.Errorf("resource discovery not initialized")
 	}
@@ -762,30 +775,35 @@ func (m *WorkloadManager) RestartWorkload(ctx context.Context, kind, namespace, 
 	return nil
 }
 
-// ScaleWorkload scales a Deployment or StatefulSet to the specified replica count.
+// ScaleWorkload scales a Deployment, StatefulSet, or Rollout to the specified replica count.
 func (m *WorkloadManager) ScaleWorkload(ctx context.Context, kind, namespace, name string, replicas int32) error {
 	if m.dynClient == nil {
 		return fmt.Errorf("dynamic client not initialized")
 	}
-	if m.discovery == nil {
-		return fmt.Errorf("resource discovery not initialized")
-	}
 
 	normalizedKind := NormalizeWorkloadKind(kind)
-	if normalizedKind != "deployments" && normalizedKind != "statefulsets" {
-		return fmt.Errorf("scaling not supported for %s (only deployments and statefulsets)", kind)
-	}
-
-	gvr, ok := m.discovery.GetGVR(normalizedKind)
-	if !ok {
-		return fmt.Errorf("unknown resource kind: %s", kind)
+	var gvr schema.GroupVersionResource
+	switch normalizedKind {
+	case "rollouts":
+		// Fixed, not discovered: the CRD may not be in discovery's cache yet.
+		gvr = rollouts.GVR
+	case "deployments", "statefulsets":
+		if m.discovery == nil {
+			return fmt.Errorf("resource discovery not initialized")
+		}
+		found, ok := m.discovery.GetGVR(normalizedKind)
+		if !ok {
+			return fmt.Errorf("unknown resource kind: %s", kind)
+		}
+		gvr = found
+	default:
+		return fmt.Errorf("scaling not supported for %s (only deployments, statefulsets, and rollouts)", kind)
 	}
 
 	patch := fmt.Sprintf(`{"spec":{"replicas":%d}}`, replicas)
-	_, err := m.dynClient.Resource(gvr).Namespace(namespace).Patch(
+	if _, err := m.dynClient.Resource(gvr).Namespace(namespace).Patch(
 		ctx, name, types.MergePatchType, []byte(patch), metav1.PatchOptions{},
-	)
-	if err != nil {
+	); err != nil {
 		return fmt.Errorf("failed to scale workload: %w", err)
 	}
 
@@ -822,16 +840,23 @@ func ScaleWorkloadDirect(ctx context.Context, dynClient dynamic.Interface, kind,
 	return nil
 }
 
-// ListWorkloadRevisions returns the revision history for a Deployment, StatefulSet, or DaemonSet.
+// ListWorkloadRevisions returns the revision history for a Deployment, StatefulSet, DaemonSet, or Rollout.
 func (m *WorkloadManager) ListWorkloadRevisions(ctx context.Context, kind, namespace, name string) ([]WorkloadRevision, error) {
 	if m.dynClient == nil {
 		return nil, fmt.Errorf("dynamic client not initialized")
 	}
+
+	normalizedKind := NormalizeWorkloadKind(kind)
+
+	// pkg/rollouts carries its own GVR, so this path works before discovery has
+	// cached the Rollout CRD.
+	if normalizedKind == "rollouts" {
+		return m.listRolloutRevisions(ctx, namespace, name)
+	}
+
 	if m.discovery == nil {
 		return nil, fmt.Errorf("resource discovery not initialized")
 	}
-
-	normalizedKind := NormalizeWorkloadKind(kind)
 
 	workloadGVR, ok := m.discovery.GetGVR(normalizedKind)
 	if !ok {
@@ -852,6 +877,27 @@ func (m *WorkloadManager) ListWorkloadRevisions(ctx context.Context, kind, names
 	default:
 		return nil, fmt.Errorf("revision history not supported for %s", kind)
 	}
+}
+
+func (m *WorkloadManager) listRolloutRevisions(ctx context.Context, namespace, name string) ([]WorkloadRevision, error) {
+	revisions, err := rollouts.ListRevisions(ctx, m.dynClient, namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]WorkloadRevision, 0, len(revisions))
+	for _, r := range revisions {
+		out = append(out, WorkloadRevision{
+			Number:    r.Number,
+			CreatedAt: r.CreatedAt,
+			Image:     r.Image,
+			IsCurrent: r.IsCurrent,
+			IsStable:  r.IsStable,
+			PodHash:   r.PodHash,
+			Replicas:  r.Replicas,
+			Template:  r.Template,
+		})
+	}
+	return out, nil
 }
 
 func (m *WorkloadManager) listDeploymentRevisions(ctx context.Context, namespace, name, workloadUID string) ([]WorkloadRevision, error) {
@@ -1008,16 +1054,22 @@ func BuildControllerRevisions(crList []unstructured.Unstructured, workloadUID st
 	return revisions
 }
 
-// RollbackWorkload rolls back a Deployment, StatefulSet, or DaemonSet to a specific revision.
+// RollbackWorkload rolls back a Deployment, StatefulSet, DaemonSet, or Rollout to a specific revision.
 func (m *WorkloadManager) RollbackWorkload(ctx context.Context, kind, namespace, name string, revision int64) error {
 	if m.dynClient == nil {
 		return fmt.Errorf("dynamic client not initialized")
 	}
+
+	normalizedKind := NormalizeWorkloadKind(kind)
+
+	if normalizedKind == "rollouts" {
+		_, err := rollouts.Undo(ctx, m.dynClient, namespace, name, revision)
+		return err
+	}
+
 	if m.discovery == nil {
 		return fmt.Errorf("resource discovery not initialized")
 	}
-
-	normalizedKind := NormalizeWorkloadKind(kind)
 
 	workloadGVR, ok := m.discovery.GetGVR(normalizedKind)
 	if !ok {
@@ -1182,6 +1234,8 @@ func NormalizeWorkloadKind(kind string) string {
 		return "statefulsets"
 	case "DaemonSet", "daemonset", "daemonsets":
 		return "daemonsets"
+	case "Rollout", "rollout", "rollouts":
+		return "rollouts"
 	default:
 		return kind
 	}
