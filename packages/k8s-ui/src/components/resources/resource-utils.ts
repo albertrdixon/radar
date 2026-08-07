@@ -1492,6 +1492,42 @@ export function getRolloutStatus(rollout: any): StatusBadge {
   }
 }
 
+export function getAnalysisRunStatus(run: any): StatusBadge {
+  const phase = run.status?.phase || 'Unknown'
+  switch (phase) {
+    case 'Successful':
+      return { text: 'Successful', color: healthColors.healthy, level: 'healthy' }
+    case 'Running':
+    case 'Pending':
+      return { text: phase, color: healthColors.degraded, level: 'degraded' }
+    case 'Inconclusive':
+      return { text: 'Inconclusive', color: healthColors.alert, level: 'alert' }
+    case 'Failed':
+    case 'Error':
+      return { text: phase, color: healthColors.unhealthy, level: 'unhealthy' }
+    default:
+      return { text: phase, color: healthColors.unknown, level: 'unknown' }
+  }
+}
+
+// Counts only verdict-bearing metrics: Argo excludes dryRun results from the run's
+// phase, and Running/Pending have not passed yet.
+export function summarizeAnalysisMetrics(run: any): {
+  total: number
+  passing: number
+  notPassing: number
+  dryRun: number
+} {
+  const results: any[] = run?.status?.metricResults || []
+  const scored = results.filter((m) => !m.dryRun)
+  return {
+    total: scored.length,
+    passing: scored.filter((m) => m.phase === 'Successful').length,
+    notPassing: scored.filter((m) => ['Failed', 'Error', 'Inconclusive'].includes(m.phase)).length,
+    dryRun: results.length - scored.length,
+  }
+}
+
 export function getRolloutStrategy(rollout: any): string {
   if (rollout.spec?.strategy?.canary) return 'Canary'
   if (rollout.spec?.strategy?.blueGreen) return 'BlueGreen'
@@ -2114,6 +2150,7 @@ export function getCellFilterValue(resource: any, column: string, kind: string):
       if (kindLower === 'persistentvolumeclaims') return getPVCStatus(resource).text
       if (kindLower === 'persistentvolumes') return getPVStatus(resource).text
       if (kindLower === 'rollouts') return getRolloutStatus(resource).text
+      if (kindLower === 'analysisruns') return getAnalysisRunStatus(resource).text
       if (kindLower === 'workflows') return getWorkflowStatus(resource).text
       if (kindLower === 'cronworkflows') return getCronWorkflowStatus(resource).text
       if (kindLower === 'hpas' || kindLower === 'horizontalpodautoscalers') return getHPAStatus(resource).text

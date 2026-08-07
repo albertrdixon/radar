@@ -22,6 +22,7 @@ import {
   gitOpsOwnerFromRelationships,
   getGitOpsResourceStatus,
   isDiagnoseKind,
+  isRolloutKind,
 } from '@skyhook-io/k8s-ui'
 import type { ServicePortRenderProps } from '@skyhook-io/k8s-ui/components/resources/renderers/ServiceRenderer'
 import type { SelectedResource, ResourceRef, Relationships } from '../../types'
@@ -46,6 +47,8 @@ import {
   useRestartWorkload,
   useWorkloadRevisions,
   useRollbackWorkload,
+  useRolloutAction,
+  useRolloutCapabilities,
   useWorkloadPods,
   useFluxReconcile,
   useFluxSyncWithSource,
@@ -109,6 +112,7 @@ import { RoleBindingRenderer } from '../resources/renderers/RoleBindingRenderer'
 import { NamespaceRenderer } from '../resources/renderers/NamespaceRenderer'
 import { HPARenderer } from '../resources/renderers/HPARenderer'
 import { PVCRenderer } from '../resources/renderers/PVCRenderer'
+import { RolloutRenderer } from '../resources/renderers/RolloutRenderer'
 import { CreateResourceDialog } from '../shared/CreateResourceDialog'
 import { cleanYamlForDuplicate } from '../../utils/skeleton-yaml'
 import { useDesktopDownload } from '../../hooks/useDesktopDownload'
@@ -141,6 +145,7 @@ const rendererOverrides: RendererOverrides = {
   NamespaceRenderer,
   HPARenderer,
   PVCRenderer,
+  RolloutRenderer,
 }
 
 // ============================================================================
@@ -269,11 +274,19 @@ function useActionsBarProps(
   const deleteMutation = useDeleteResource()
   const restartWorkloadMutation = useRestartWorkload()
   const rollbackMutation = useRollbackWorkload()
+  const rolloutActionMutation = useRolloutAction()
   const triggerCronJobMutation = useTriggerCronJob()
   const suspendCronJobMutation = useSuspendCronJob()
   const resumeCronJobMutation = useResumeCronJob()
 
-  const isRollbackKind = ['deployments', 'statefulsets', 'daemonsets'].includes(kind.toLowerCase())
+  const isRollbackKind = ['deployments', 'statefulsets', 'daemonsets', 'rollouts'].includes(kind.toLowerCase())
+  const isRollout = isRolloutKind(kind)
+  const { data: rolloutCapabilities } = useRolloutCapabilities(namespace, name, isRollout)
+  // Restart and Rollback are the generic workload buttons, so a Rollout has to
+  // withhold the callback the way promote-full does. Permissive until the probe
+  // answers — withholding while it loads would flicker the shared buttons.
+  const rolloutAllows = (verb: 'restart' | 'rollback') =>
+    !isRollout || !rolloutCapabilities || rolloutCapabilities[verb]
   const {
     data: revisionsList,
     isLoading: revisionsLoading,
@@ -339,17 +352,28 @@ function useActionsBarProps(
     cascadeDependents: cascadePreview?.dependents,
     cascadeLoading,
     cascadeRootResolved: cascadeError ? false : cascadePreview?.rootResolved,
-    onRestart: (params: Parameters<typeof restartWorkloadMutation.mutate>[0]) =>
-      restartWorkloadMutation.mutate(params),
+    onRestart: rolloutAllows('restart')
+      ? (params: Parameters<typeof restartWorkloadMutation.mutate>[0]) =>
+          restartWorkloadMutation.mutate(params)
+      : undefined,
     isRestarting: restartWorkloadMutation.isPending,
     revisions: revisionsList,
     revisionsLoading,
     revisionsError: revisionsError ?? null,
-    onRollback: (
-      params: Parameters<typeof rollbackMutation.mutate>[0],
-      callbacks?: { onSuccess?: () => void },
-    ) => rollbackMutation.mutate(params, { onSuccess: callbacks?.onSuccess }),
+    onRollback: rolloutAllows('rollback')
+      ? (
+          params: Parameters<typeof rollbackMutation.mutate>[0],
+          callbacks?: { onSuccess?: () => void },
+        ) => rollbackMutation.mutate(params, { onSuccess: callbacks?.onSuccess })
+      : undefined,
     isRollingBack: rollbackMutation.isPending,
+    // Absent when promote-full is denied — the dialog reads the callback's
+    // presence as the permission signal and hides the option.
+    // mutateAsync, not mutate: the revision dialog awaits this before closing.
+    onRolloutPromoteFull: rolloutCapabilities?.promoteFull
+      ? (params: { namespace: string; name: string }) =>
+          rolloutActionMutation.mutateAsync({ action: 'promote-full', ...params })
+      : undefined,
     onTriggerCronJob: (params: Parameters<typeof triggerCronJobMutation.mutate>[0]) =>
       triggerCronJobMutation.mutate(params),
     isTriggeringCronJob: triggerCronJobMutation.isPending,

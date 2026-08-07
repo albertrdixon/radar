@@ -443,6 +443,11 @@ export function baseSubtitle(kind: NodeKind, nodeData: Record<string, unknown>):
       const instanceType = nodeData.instanceType as string;
       return instanceType || "";
     }
+    case "AnalysisRun": {
+      const phase = (nodeData.phase as string) || "Unknown";
+      const trigger = nodeData.trigger as string;
+      return trigger ? `${trigger} • ${phase}` : phase;
+    }
     case "Internet":
       return "";
     default:

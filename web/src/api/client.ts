@@ -4388,6 +4388,10 @@ export interface WorkloadRevision {
   isCurrent: boolean;
   replicas: number;
   template?: string; // Pod template spec as YAML (for revision diff)
+  // Argo Rollouts only: mid-canary isCurrent (rolling out) and isStable
+  // (serving traffic, what an abort reverts to) are different revisions.
+  isStable?: boolean;
+  podHash?: string;
 }
 
 export function useWorkloadRevisions(
@@ -4454,6 +4458,119 @@ export function useRollbackWorkload() {
         queryKey: [
           "workload-revisions",
           variables.kind,
+          variables.namespace,
+          variables.name,
+        ],
+      });
+      queryClient.invalidateQueries({ queryKey: ["topology"] });
+    },
+  });
+}
+
+// ============================================================================
+// Argo Rollouts progressive-delivery control plane
+// ============================================================================
+
+export type RolloutAction =
+  | "abort"
+  | "retry"
+  | "promote"
+  | "promote-full"
+  | "skip-step";
+
+export interface RolloutCapabilities {
+  abort: boolean;
+  retry: boolean;
+  promote: boolean;
+  promoteFull: boolean;
+  skipStep: boolean;
+  rollback: boolean;
+  restart: boolean;
+  strategy: string;
+  terminating: boolean;
+}
+
+export function useRolloutCapabilities(
+  namespace: string,
+  name: string,
+  enabled = true,
+) {
+  return useQuery<RolloutCapabilities>({
+    queryKey: ["rollout-capabilities", namespace, name],
+    queryFn: () => fetchJSON(`/rollouts/${namespace}/${name}/capabilities`),
+    enabled: Boolean(namespace && name && enabled),
+  });
+}
+
+const ROLLOUT_ACTION_MESSAGES: Record<
+  RolloutAction,
+  { errorMessage: string; successMessage: string }
+> = {
+  abort: {
+    errorMessage: "Failed to abort rollout",
+    successMessage: "Rollout aborted — traffic reverted to the stable version",
+  },
+  retry: {
+    errorMessage: "Failed to retry rollout",
+    successMessage: "Rollout retried",
+  },
+  promote: {
+    errorMessage: "Failed to promote rollout",
+    successMessage: "Rollout promoted",
+  },
+  "promote-full": {
+    errorMessage: "Failed to promote rollout",
+    successMessage: "Rollout promoted to full — remaining steps skipped",
+  },
+  "skip-step": {
+    errorMessage: "Failed to skip step",
+    successMessage: "Skipped to the next step",
+  },
+};
+
+export function useRolloutAction() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      action,
+      namespace,
+      name,
+    }: {
+      action: RolloutAction;
+      namespace: string;
+      name: string;
+    }) => {
+      const response = await apiFetch(
+        `${getApiBase()}/rollouts/${namespace}/${name}/${action}`,
+        { method: "POST" },
+      );
+      if (!response.ok) {
+        const error = await response
+          .json()
+          .catch(() => ({ error: "Unknown error" }));
+        throw new Error(error.error || `HTTP ${response.status}`);
+      }
+      return response.json();
+    },
+    // meta is static, so per-action success wording goes through onSuccess.
+    meta: { errorMessage: "Rollout action failed" },
+    onSuccess: (_, variables) => {
+      showApiSuccess(ROLLOUT_ACTION_MESSAGES[variables.action].successMessage);
+      queryClient.invalidateQueries({ queryKey: ["resources", "rollouts"] });
+      queryClient.invalidateQueries({
+        queryKey: ["resource", "rollouts", variables.namespace, variables.name],
+      });
+      queryClient.invalidateQueries({
+        queryKey: [
+          "rollout-capabilities",
+          variables.namespace,
+          variables.name,
+        ],
+      });
+      queryClient.invalidateQueries({
+        queryKey: [
+          "workload-revisions",
+          "rollouts",
           variables.namespace,
           variables.name,
         ],

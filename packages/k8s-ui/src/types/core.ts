@@ -1424,6 +1424,9 @@ export interface WorkloadRevision {
   isCurrent: boolean
   replicas: number
   template?: string // Pod template spec as YAML (for revision diff)
+  // Rollouts only: mid-canary isCurrent (rolling out) and isStable (serving traffic) differ.
+  isStable?: boolean
+  podHash?: string
 }
 
 // Workload log stream event data

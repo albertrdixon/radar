@@ -1,18 +1,301 @@
-import { Server, GitBranch, AlertTriangle, Network } from 'lucide-react'
+import { useState } from 'react'
+import { Server, GitBranch, Network, Activity, Play, FastForward, SkipForward, RotateCcw, Undo2 } from 'lucide-react'
 import { clsx } from 'clsx'
-import { Section, PropertyList, Property, ConditionsSection, PodTemplateSection } from '../../ui/drawer-components'
+import { AlertBanner, Section, PropertyList, Property, ConditionsSection, PodTemplateSection, type ConditionTone } from '../../ui/drawer-components'
+import { Tooltip } from '../../ui/Tooltip'
+import { ConfirmDialog } from '../../ui/ConfirmDialog'
 import { formatAge } from '../resource-utils'
 import { BADGE_INACTIVE } from '../../../utils/badge-colors'
 
-interface RolloutRendererProps {
-  data: any
+export type RolloutAction = 'abort' | 'retry' | 'promote' | 'promote-full' | 'skip-step'
+
+export interface RolloutCapabilities {
+  abort: boolean
+  retry: boolean
+  promote: boolean
+  promoteFull: boolean
+  skipStep: boolean
+  rollback: boolean
+  restart: boolean
+  strategy: string
+  terminating: boolean
 }
 
-export function RolloutRenderer({ data }: RolloutRendererProps) {
+export interface RolloutActionConfirm {
+  title: string
+  message: string
+}
+
+export interface RolloutActionSpec {
+  action: RolloutAction
+  label: string
+  pendingLabel: string
+  icon: typeof Play
+  hint: string
+  blocked?: string
+  destructive?: boolean
+  // Set on the verbs that shift production traffic in one click.
+  confirm?: RolloutActionConfirm
+}
+
+interface RolloutRendererProps {
+  data: any
+  onNavigate?: (ref: { kind: string; namespace: string; name: string }) => void
+  capabilities?: RolloutCapabilities
+  onAction?: (action: RolloutAction) => void
+  pendingAction?: RolloutAction | null
+}
+
+// A denied capability omits the verb entirely; `blocked` covers wrong-state only.
+export function rolloutActions(data: any, capabilities?: RolloutCapabilities): RolloutActionSpec[] {
+  if (!capabilities) return []
+
+  const status = data?.status || {}
+  const phase = status.phase || 'Unknown'
+  const steps = data?.spec?.strategy?.canary?.steps || []
+  const isAborted = status.abort === true
+  const isSettled = phase === 'Healthy' && !isAborted
+  const stepsRemaining = steps.length > 0 && (status.currentStepIndex ?? 0) < steps.length
+  // Mid-analysis a canary is Progressing with nothing paused, and promote advances
+  // the step rather than clearing a pause — so gating on Paused alone hides it.
+  const stepAnalysis = status.canary?.currentStepAnalysisRunStatus?.status
+  const analysisInFlight =
+    stepAnalysis === 'Running' || stepAnalysis === 'Pending' || stepAnalysis === 'Inconclusive'
+  const promotable = phase === 'Paused' || analysisInFlight
+
+  const actions: RolloutActionSpec[] = []
+  if (capabilities.promote) {
+    actions.push({
+      action: 'promote',
+      label: 'Promote',
+      pendingLabel: 'Promoting…',
+      icon: Play,
+      hint: 'Clear the current pause, or advance past the running analysis, and continue',
+      // An aborted Rollout keeps an Inconclusive analysis status, so promotable stays
+      // true; Argo's own promote reports success there and advances nothing.
+      blocked: isAborted
+        ? 'Retry the rollout first'
+        : !promotable
+          ? 'Rollout is not paused and no analysis is running'
+          : undefined,
+    })
+  }
+  if (capabilities.promoteFull) {
+    actions.push({
+      action: 'promote-full',
+      label: 'Promote full',
+      pendingLabel: 'Promoting…',
+      icon: FastForward,
+      hint: 'Skip every remaining step, pause, and analysis — emergency hotfix path',
+      blocked: isSettled ? 'Nothing left to promote' : isAborted ? 'Retry the rollout first' : undefined,
+      confirm: {
+        title: 'Promote fully?',
+        message:
+          'Every remaining step, pause, and analysis is skipped and the new version goes to 100% of production traffic immediately.',
+      },
+    })
+  }
+  if (capabilities.skipStep) {
+    actions.push({
+      action: 'skip-step',
+      label: 'Skip step',
+      pendingLabel: 'Skipping…',
+      icon: SkipForward,
+      hint: 'Advance one canary step without waiting for it',
+      blocked: !stepsRemaining ? 'No canary step left to skip' : isAborted ? 'Retry the rollout first' : undefined,
+    })
+  }
+  if (capabilities.retry && isAborted) {
+    actions.push({
+      action: 'retry',
+      label: 'Retry',
+      pendingLabel: 'Retrying…',
+      icon: RotateCcw,
+      hint: 'Clear the abort and resume the rollout from its current step',
+    })
+  }
+  if (capabilities.abort && !isAborted) {
+    actions.push({
+      action: 'abort',
+      label: 'Abort',
+      pendingLabel: 'Aborting…',
+      icon: Undo2,
+      hint: 'Shift all traffic back to the stable revision and stop progressing',
+      blocked: isSettled ? 'Rollout is fully promoted — roll back instead' : undefined,
+      destructive: true,
+      confirm: {
+        title: 'Abort rollout?',
+        message:
+          'All production traffic shifts back to the stable revision and the rollout stops progressing.',
+      },
+    })
+  }
+  return actions
+}
+
+export interface RolloutProblem {
+  color: 'red' | 'yellow'
+  message: string
+}
+
+export function rolloutProblems(data: any): RolloutProblem[] {
+  const status = data?.status || {}
+  const phase = status.phase || 'Unknown'
+  const conditions: any[] = status.conditions || []
+  const problems: RolloutProblem[] = []
+
+  if (status.abort === true) {
+    problems.push({ color: 'red', message: status.message || 'Rollout was aborted' })
+  }
+  if (phase === 'Degraded') {
+    problems.push({ color: 'red', message: status.message || 'Rollout is degraded' })
+  }
+
+  const progressDeadline = conditions.find(
+    (c) => c.type === 'Progressing' && c.status === 'False' && c.reason === 'ProgressDeadlineExceeded'
+  )
+  if (progressDeadline) {
+    problems.push({ color: 'red', message: progressDeadline.message || 'Progress deadline exceeded' })
+  }
+
+  const invalidSpec = conditions.find((c) => c.type === 'InvalidSpec' && c.status === 'True')
+  if (invalidSpec) {
+    problems.push({ color: 'red', message: invalidSpec.message || 'Invalid rollout spec' })
+  }
+
+  if (phase === 'Paused' && !status.abort) {
+    const reasons = (status.pauseConditions || []).map((pc: any) => {
+      const since = pc.startTime ? ` (since ${formatAge(pc.startTime)})` : ''
+      return `${pc.reason || 'Unknown'}${since}`
+    })
+    problems.push({
+      color: 'yellow',
+      message: reasons.length > 0 ? `Rollout is paused: ${reasons.join('; ')}` : 'Rollout is paused',
+    })
+  }
+
+  for (const run of rolloutAnalysisRuns(status)) {
+    if (run.status === 'Inconclusive' || run.status === 'Failed' || run.status === 'Error') {
+      problems.push({
+        color: run.status === 'Inconclusive' ? 'yellow' : 'red',
+        message: `${run.label} ${run.status.toLowerCase()} (${run.name})${run.message ? `: ${run.message}` : ''}`,
+      })
+    }
+  }
+
+  // An aborted Rollout is also Degraded, and both read status.message — so the
+  // same sentence arrives twice. Keep the first, which carries the abort framing.
+  const seen = new Set<string>()
+  return problems.filter((p) => {
+    if (seen.has(p.message)) return false
+    seen.add(p.message)
+    return true
+  })
+}
+
+// Argo inverts polarity on two condition types: Paused=False and InvalidSpec=False
+// are the good states, which the generic True-is-healthy rule scores as failing.
+export function rolloutConditionTone(cond: { type?: string; status?: string }): ConditionTone | undefined {
+  if (cond.status !== 'True' && cond.status !== 'False') return undefined
+  const isTrue = cond.status === 'True'
+  switch (cond.type) {
+    case 'Paused':
+      return isTrue ? 'warning' : 'ok'
+    case 'InvalidSpec':
+      return isTrue ? 'fail' : 'ok'
+    default:
+      return undefined
+  }
+}
+
+/** Every CanaryStep variant Argo defines; raw JSON is unreadable in a step list. */
+export function canaryStepLabel(step: any): string {
+  if (!step || typeof step !== 'object') return 'Unknown step'
+
+  if (step.setWeight !== undefined) return `Set weight: ${step.setWeight}%`
+
+  if (step.pause !== undefined) {
+    return step.pause?.duration ? `Pause: ${step.pause.duration}` : 'Pause: until promoted'
+  }
+
+  if (step.analysis) {
+    const templates = (step.analysis.templates || [])
+      .map((t: any) => t.templateName || t.clusterTemplateName)
+      .filter(Boolean)
+    return templates.length > 0 ? `Analysis: ${templates.join(', ')}` : 'Analysis'
+  }
+
+  if (step.experiment) {
+    const templates = (step.experiment.templates || []).map((t: any) => t.name).filter(Boolean)
+    const duration = step.experiment.duration ? ` for ${step.experiment.duration}` : ''
+    return templates.length > 0
+      ? `Experiment: ${templates.join(', ')}${duration}`
+      : `Experiment${duration}`
+  }
+
+  if (step.setCanaryScale) {
+    const { weight, replicas, matchTrafficWeight } = step.setCanaryScale
+    if (matchTrafficWeight) return 'Set canary scale: match traffic weight'
+    if (replicas !== undefined) return `Set canary scale: ${replicas} replicas`
+    if (weight !== undefined) return `Set canary scale: ${weight}%`
+    return 'Set canary scale'
+  }
+
+  if (step.setHeaderRoute) {
+    const { name, match } = step.setHeaderRoute
+    // An empty match list is how a header route is torn down again.
+    if (!match || match.length === 0) return `Remove header route${name ? `: ${name}` : ''}`
+    const headers = match.map((m: any) => m.headerName).filter(Boolean)
+    return `Header route${name ? ` ${name}` : ''}${headers.length ? `: ${headers.join(', ')}` : ''}`
+  }
+
+  if (step.setMirrorRoute) {
+    const { name, match, percentage } = step.setMirrorRoute
+    if (!match || match.length === 0) return `Remove mirror route${name ? `: ${name}` : ''}`
+    const pct = percentage !== undefined ? ` (${percentage}%)` : ''
+    return `Mirror route${name ? ` ${name}` : ''}${pct}`
+  }
+
+  if (step.plugin) return `Plugin: ${step.plugin.name || 'unnamed'}`
+
+  const key = Object.keys(step)[0]
+  return key ? `Unrecognized step: ${key}` : 'Unknown step'
+}
+
+/** Populated analysis slots, in the order the controller runs them. */
+export function rolloutAnalysisRuns(
+  status: any
+): Array<{ label: string; name?: string; status?: string; message?: string }> {
+  return [
+    { label: 'Step analysis', ...(status?.canary?.currentStepAnalysisRunStatus || {}) },
+    { label: 'Background analysis', ...(status?.canary?.currentBackgroundAnalysisRunStatus || {}) },
+    { label: 'Pre-promotion analysis', ...(status?.blueGreen?.prePromotionAnalysisRunStatus || {}) },
+    { label: 'Post-promotion analysis', ...(status?.blueGreen?.postPromotionAnalysisRunStatus || {}) },
+  ].filter((run) => run.name)
+}
+
+function analysisStatusClass(status?: string): string {
+  switch (status) {
+    case 'Successful':
+      return 'status-healthy'
+    case 'Running':
+    case 'Pending':
+      return 'status-degraded'
+    case 'Inconclusive':
+      return 'status-alert'
+    case 'Failed':
+    case 'Error':
+      return 'status-unhealthy'
+    default:
+      return 'status-unknown'
+  }
+}
+
+export function RolloutRenderer({ data, onNavigate, capabilities, onAction, pendingAction }: RolloutRendererProps) {
+  const [confirming, setConfirming] = useState<RolloutActionSpec | null>(null)
   const status = data.status || {}
   const spec = data.spec || {}
   const phase = status.phase || 'Unknown'
-  const conditions = status.conditions || []
 
   const canaryStrategy = spec.strategy?.canary
   const blueGreenStrategy = spec.strategy?.blueGreen
@@ -34,46 +317,9 @@ export function RolloutRenderer({ data }: RolloutRendererProps) {
       })()
     : null
 
-  // Problem detection
-  const problems: Array<{ color: 'red' | 'yellow'; message: string }> = []
-
-  // Aborted rollout detection — must come before generic paused check
-  if (status.abort === true) {
-    problems.push({ color: 'red', message: status.message || 'Rollout was aborted' })
-  }
-
-  if (phase === 'Degraded') {
-    problems.push({ color: 'red', message: status.message || 'Rollout is degraded' })
-  }
-
-  const progressDeadlineCond = conditions.find(
-    (c: any) => c.type === 'Progressing' && c.status === 'False' && c.reason === 'ProgressDeadlineExceeded'
-  )
-  if (progressDeadlineCond) {
-    problems.push({ color: 'red', message: progressDeadlineCond.message || 'Progress deadline exceeded' })
-  }
-
-  const invalidSpecCond = conditions.find(
-    (c: any) => c.type === 'InvalidSpec' && c.status === 'True'
-  )
-  if (invalidSpecCond) {
-    problems.push({ color: 'red', message: invalidSpecCond.message || 'Invalid rollout spec' })
-  }
-
-  // Pause conditions — show specific reasons instead of generic "Rollout is paused"
-  const pauseConditions: Array<{ reason: string; startTime?: string }> = status.pauseConditions || []
-  if (phase === 'Paused' && !status.abort) {
-    if (pauseConditions.length > 0) {
-      const reasons = pauseConditions.map((pc: any) => {
-        const reason = pc.reason || 'Unknown'
-        const since = pc.startTime ? ` (since ${formatAge(pc.startTime)})` : ''
-        return `${reason}${since}`
-      })
-      problems.push({ color: 'yellow', message: `Rollout is paused: ${reasons.join('; ')}` })
-    } else {
-      problems.push({ color: 'yellow', message: 'Rollout is paused' })
-    }
-  }
+  const analysisRuns = rolloutAnalysisRuns(status)
+  const problems = rolloutProblems(data)
+  const actions = onAction ? rolloutActions(data, capabilities) : []
 
   // Phase badge color
   const phaseColor = (() => {
@@ -88,45 +334,58 @@ export function RolloutRenderer({ data }: RolloutRendererProps) {
 
   return (
     <>
-      {/* Problem alerts */}
       {problems.map((problem, i) => (
-        <div
+        <AlertBanner
           key={i}
-          className={clsx(
-            'mb-4 p-3 border rounded-lg',
-            problem.color === 'red'
-              ? 'bg-red-500/10 border-red-500/30'
-              : 'bg-yellow-500/10 border-yellow-500/30'
-          )}
-        >
-          <div className="flex items-start gap-2">
-            <AlertTriangle
-              className={clsx(
-                'w-4 h-4 mt-0.5 shrink-0',
-                problem.color === 'red' ? 'text-red-400' : 'text-yellow-400'
-              )}
-            />
-            <div className="flex-1 min-w-0">
-              <div
-                className={clsx(
-                  'text-sm font-medium',
-                  problem.color === 'red' ? 'text-red-400' : 'text-yellow-400'
-                )}
-              >
-                {problem.color === 'red' ? 'Issue Detected' : 'Warning'}
-              </div>
-              <div
-                className={clsx(
-                  'text-xs mt-1',
-                  problem.color === 'red' ? 'text-red-300/80' : 'text-yellow-300/80'
-                )}
-              >
-                {problem.message}
-              </div>
-            </div>
-          </div>
-        </div>
+          variant={problem.color === 'red' ? 'error' : 'warning'}
+          title={problem.color === 'red' ? 'Issue Detected' : 'Warning'}
+          message={problem.message}
+        />
       ))}
+
+      {actions.length > 0 && (
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          {actions.map((spec) => {
+            const { action, label, pendingLabel, icon: Icon, hint, blocked, destructive, confirm } = spec
+            const pending = pendingAction === action
+            const disabled = Boolean(blocked) || pendingAction != null || capabilities?.terminating
+            return (
+              <Tooltip key={action} content={capabilities?.terminating ? 'Rollout is being deleted' : blocked || hint} delay={150}>
+                <button
+                  onClick={() => (confirm ? setConfirming(spec) : onAction?.(action))}
+                  disabled={disabled}
+                  className={clsx(
+                    'flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40',
+                    destructive
+                      ? 'border border-red-400/50 text-red-400 enabled:hover:bg-red-500/10'
+                      : 'btn-brand-muted'
+                  )}
+                >
+                  <Icon className={clsx('h-3.5 w-3.5', pending && 'animate-pulse')} />
+                  {pending ? pendingLabel : label}
+                </button>
+              </Tooltip>
+            )
+          })}
+        </div>
+      )}
+
+      {confirming?.confirm && (
+        <ConfirmDialog
+          open
+          onClose={() => setConfirming(null)}
+          onConfirm={() => {
+            const action = confirming.action
+            setConfirming(null)
+            onAction?.(action)
+          }}
+          title={confirming.confirm.title}
+          message={confirming.confirm.message}
+          details={`${data.metadata?.namespace}/${data.metadata?.name}`}
+          confirmLabel={confirming.label}
+          variant={confirming.destructive ? 'danger' : 'warning'}
+        />
+      )}
 
       {/* Status section */}
       <Section title="Status" icon={Server}>
@@ -164,12 +423,19 @@ export function RolloutRenderer({ data }: RolloutRendererProps) {
               )}
               <Property label="Canary Service" value={canaryStrategy.canaryService} />
               <Property label="Stable Service" value={canaryStrategy.stableService} />
+              {status.canary?.currentExperiment && (
+                <Property label="Running Experiment" value={status.canary.currentExperiment} />
+              )}
             </>
           ) : blueGreenStrategy ? (
             <>
               <Property label="Strategy" value="Blue-Green" />
               <Property label="Active Service" value={blueGreenStrategy.activeService} />
               <Property label="Preview Service" value={blueGreenStrategy.previewService} />
+              {/* The selectors are what each Service actually serves right now — a
+                  rolled-back revision sits in preview until it is promoted. */}
+              <Property label="Active Selector" value={status.blueGreen?.activeSelector} />
+              <Property label="Preview Selector" value={status.blueGreen?.previewSelector} />
               <Property
                 label="Auto Promote"
                 value={
@@ -178,6 +444,15 @@ export function RolloutRenderer({ data }: RolloutRendererProps) {
                     : undefined
                 }
               />
+              {blueGreenStrategy.autoPromotionSeconds !== undefined && (
+                <Property
+                  label="Auto Promote After"
+                  value={`${blueGreenStrategy.autoPromotionSeconds}s`}
+                />
+              )}
+              {status.blueGreen?.scaleUpPreviewCheckPoint && (
+                <Property label="Preview" value="Scaled up, awaiting promotion" />
+              )}
             </>
           ) : (
             <Property label="Strategy" value="Unknown" />
@@ -256,6 +531,40 @@ export function RolloutRenderer({ data }: RolloutRendererProps) {
         </Section>
       )}
 
+      {analysisRuns.length > 0 && (
+        <Section title="Analysis" icon={Activity}>
+          <PropertyList>
+            {analysisRuns.map((run) => (
+              <Property
+                key={run.label}
+                label={run.label}
+                value={
+                  <span className="flex items-center gap-2">
+                    <span className={clsx('badge', analysisStatusClass(run.status))}>{run.status || 'Unknown'}</span>
+                    {onNavigate ? (
+                      <button
+                        onClick={() =>
+                          onNavigate({
+                            kind: 'AnalysisRun',
+                            namespace: data?.metadata?.namespace ?? '',
+                            name: run.name!,
+                          })
+                        }
+                        className="font-mono text-xs text-brand hover:underline"
+                      >
+                        {run.name}
+                      </button>
+                    ) : (
+                      <span className="font-mono text-xs text-theme-text-secondary">{run.name}</span>
+                    )}
+                  </span>
+                }
+              />
+            ))}
+          </PropertyList>
+        </Section>
+      )}
+
       {/* Canary Steps visual */}
       {isCanary && steps.length > 0 && (
         <Section title={`Canary Steps (${steps.length})`} defaultExpanded>
@@ -265,17 +574,7 @@ export function RolloutRenderer({ data }: RolloutRendererProps) {
               const isCurrent = currentStepIndex !== undefined && index === currentStepIndex
               const isPending = currentStepIndex === undefined || index > currentStepIndex
 
-              const stepLabel = (() => {
-                if (step.setWeight !== undefined) return `Set Weight: ${step.setWeight}%`
-                if (step.pause !== undefined) {
-                  if (step.pause.duration) return `Pause: ${step.pause.duration}`
-                  return 'Pause: manual'
-                }
-                // Handle other step types generically
-                const key = Object.keys(step)[0]
-                if (key) return `${key}: ${JSON.stringify(step[key])}`
-                return 'Unknown step'
-              })()
+              const stepLabel = canaryStepLabel(step)
 
               return (
                 <div
@@ -324,7 +623,7 @@ export function RolloutRenderer({ data }: RolloutRendererProps) {
       </Section>
 
       {/* Conditions section */}
-      <ConditionsSection conditions={status.conditions} />
+      <ConditionsSection conditions={status.conditions} getConditionTone={rolloutConditionTone} />
     </>
   )
 }

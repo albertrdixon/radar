@@ -10,6 +10,7 @@ import {
   getNodeStatus,
   getPVCStatus,
   getRolloutStatus,
+  getAnalysisRunStatus,
   getWorkflowStatus,
   getCronWorkflowStatus,
   getCertificateStatus,
@@ -98,6 +99,7 @@ import {
   NodeRenderer,
   PVCRenderer,
   RolloutRenderer,
+  AnalysisRunRenderer,
   CertificateRenderer,
   WorkflowRenderer,
   PersistentVolumeRenderer,
@@ -334,6 +336,12 @@ export interface RendererOverrides {
     data: any
     onNavigate?: (ref: ResourceRef) => void
   }>
+  // Rollout: host probes /api/rollouts/.../capabilities and wires the
+  // promote / abort / skip-step mutations into the action row.
+  RolloutRenderer?: React.ComponentType<{
+    data: any
+    onNavigate?: (ref: ResourceRef) => void
+  }>
 }
 
 // Known resource types with specific renderers (module-level to avoid re-allocation)
@@ -341,7 +349,7 @@ const KNOWN_KINDS = new Set([
   'pods', 'deployments', 'statefulsets', 'daemonsets', 'replicasets',
   'services', 'endpointslices', 'ingresses', 'configmaps', 'secrets', 'jobs', 'cronjobs', 'cronworkflows',
   'hpas', 'horizontalpodautoscalers', 'nodes', 'persistentvolumeclaims',
-  'rollouts', 'certificates', 'workflows', 'persistentvolumes',
+  'rollouts', 'analysisruns', 'certificates', 'workflows', 'persistentvolumes',
   'storageclasses', 'certificaterequests', 'clusterissuers', 'issuers',
   'orders', 'challenges',
   'gateways', 'gatewayclasses', 'httproutes', 'grpcroutes', 'tcproutes', 'tlsroutes', 'sealedsecrets', 'workflowtemplates', 'clusterworkflowtemplates',
@@ -574,6 +582,7 @@ export function ResourceRendererDispatch({
   const NamespaceComp = rendererOverrides?.NamespaceRenderer ?? NamespaceRenderer
   const HPAComp = rendererOverrides?.HPARenderer ?? HPARenderer
   const PVCComp = rendererOverrides?.PVCRenderer ?? PVCRenderer
+  const RolloutComp = rendererOverrides?.RolloutRenderer ?? RolloutRenderer
   const scaleBlockedBy = replicaScalers(relationships?.scalers)
 
   const sidebarContent = showCommonSections && (
@@ -613,7 +622,8 @@ export function ResourceRendererDispatch({
         {(kind === 'hpas' || kind === 'horizontalpodautoscalers') && <HPAComp data={data} onNavigate={onNavigate} hpaDiagnosis={hpaDiagnosis} />}
         {kind === 'nodes' && <NodeComp data={data} relationships={relationships} />}
         {kind === 'persistentvolumeclaims' && <PVCComp data={data} onNavigate={onNavigate} />}
-        {kind === 'rollouts' && <RolloutRenderer data={data} />}
+        {kind === 'rollouts' && <RolloutComp data={data} onNavigate={onNavigate} />}
+        {kind === 'analysisruns' && <AnalysisRunRenderer data={data} onNavigate={onNavigate} />}
         {kind === 'certificates' && !data?.apiVersion?.includes('networking.internal.knative.dev') && <CertificateRenderer data={data} />}
         {kind === 'workflows' && <WorkflowRenderer data={data} onNavigate={onNavigate} />}
         {kind === 'persistentvolumes' && <PersistentVolumeRenderer data={data} onNavigate={onNavigate} />}
@@ -865,6 +875,7 @@ export function getResourceStatus(kind: string, data: any): { text: string; colo
   if (k === 'nodes') return getNodeStatus(data)
   if (k === 'persistentvolumeclaims') return getPVCStatus(data)
   if (k === 'rollouts') return getRolloutStatus(data)
+  if (k === 'analysisruns') return getAnalysisRunStatus(data)
   if (k === 'workflows') return getWorkflowStatus(data)
   if (k === 'cronworkflows') return getCronWorkflowStatus(data)
   if (k === 'certificates') {

@@ -82,6 +82,9 @@ interface ResourceActionsBarProps {
   revisionsError?: Error | null
   onRollback?: (params: { kind: string; namespace: string; name: string; revision: number }, callbacks?: { onSuccess?: () => void; onError?: (err: unknown) => void }) => void
   isRollingBack?: boolean
+  // A rolled-back Rollout re-enters its strategy: canary replays every step,
+  // blueGreen parks the revision in preview. Absent when promote-full is denied.
+  onRolloutPromoteFull?: (params: { namespace: string; name: string }) => void | Promise<unknown>
 
   // CronJob actions
   onTriggerCronJob?: (params: { namespace: string; name: string }) => void
@@ -134,6 +137,7 @@ export function ResourceActionsBar({
   onDelete, isDeleting, cascadeDependents, cascadeLoading, cascadeRootResolved,
   onRestart, isRestarting,
   revisions: revisionsList, revisionsLoading, revisionsError, onRollback, isRollingBack,
+  onRolloutPromoteFull,
   onTriggerCronJob, isTriggeringCronJob,
   onSuspendCronJob, isSuspendingCronJob,
   onResumeCronJob, isResumingCronJob,
@@ -169,7 +173,7 @@ export function ResourceActionsBar({
 
   // Rollback dialog state
   const [showRevisions, setShowRevisions] = useState(false)
-  const isRollbackKind = ['deployments', 'statefulsets', 'daemonsets'].includes(kind)
+  const isRollbackKind = ['deployments', 'statefulsets', 'daemonsets', 'rollouts'].includes(kind)
   const hasMultipleRevisions = (revisionsList?.length ?? 0) > 1
 
   function handleDeleteConfirm(force: boolean) {
@@ -662,7 +666,7 @@ export function ResourceActionsBar({
         </div>
       </ConfirmDialog>
 
-      {showRevisions && ['deployments', 'statefulsets', 'daemonsets'].includes(kind) && (
+      {showRevisions && isRollbackKind && (
         <RevisionHistoryDialog
           kind={resource.kind}
           namespace={resource.namespace}
@@ -674,6 +678,7 @@ export function ResourceActionsBar({
           error={revisionsError}
           onRollback={onRollback}
           isRollingBack={isRollingBack}
+          onRolloutPromoteFull={onRolloutPromoteFull}
         />
       )}
     </div>
@@ -879,7 +884,54 @@ function RevisionImage({ image, displayImage }: { image: string; displayImage: s
   )
 }
 
-export function RevisionHistoryDialog({ kind, namespace, name, open, onClose, revisions, isLoading, error, onRollback, isRollingBack }: {
+// Accepts both the singular Kind and the plural route segment.
+export function isRolloutKind(kind: string): boolean {
+  return kind.toLowerCase().startsWith('rollout')
+}
+
+// Deliberately not strategy-gated: canary replays its steps and blueGreen parks
+// the revision in preview, so both need promote-full to land a rollback.
+export function offersPromoteAfterRollback(kind: string, hasPromoteFull: boolean): boolean {
+  return isRolloutKind(kind) && hasPromoteFull
+}
+
+export interface RevisionRoleBadge {
+  label: 'Stable' | 'Current' | 'Rolling out'
+  tone: 'status-healthy' | 'status-degraded'
+  tip?: string
+}
+
+// Mid-canary a Rollout's current revision is not yet the stable one; for every
+// other workload kind the two always coincide.
+export function revisionRoleBadges(rev: WorkloadRevision, isRollout: boolean): RevisionRoleBadge[] {
+  const badges: RevisionRoleBadge[] = []
+  if (rev.isStable && !rev.isCurrent) {
+    badges.push({ label: 'Stable', tone: 'status-healthy', tip: 'Serving stable traffic — an abort reverts here' })
+  }
+  if (rev.isCurrent) {
+    const settled = rev.isStable || !isRollout
+    badges.push({ label: settled ? 'Current' : 'Rolling out', tone: settled ? 'status-healthy' : 'status-degraded' })
+  }
+  return badges
+}
+
+// Awaits promote-full so the dialog cannot close on a half-landed rollback. A
+// failure is reported by the mutation's error toast, so it must not block the close.
+export async function completePromoteAfterRollback(
+  promote: () => void | Promise<unknown>,
+  setPending: (pending: boolean) => void,
+): Promise<void> {
+  setPending(true)
+  try {
+    await promote()
+  } catch {
+    // already surfaced to the user
+  } finally {
+    setPending(false)
+  }
+}
+
+export function RevisionHistoryDialog({ kind, namespace, name, open, onClose, revisions, isLoading, error, onRollback, isRollingBack, onRolloutPromoteFull }: {
   kind: string
   namespace: string
   name: string
@@ -890,11 +942,21 @@ export function RevisionHistoryDialog({ kind, namespace, name, open, onClose, re
   error?: Error | null
   onRollback?: (params: { kind: string; namespace: string; name: string; revision: number }, callbacks?: { onSuccess?: () => void; onError?: (err: unknown) => void }) => void
   isRollingBack?: boolean
+  onRolloutPromoteFull?: (params: { namespace: string; name: string }) => void | Promise<unknown>
 }) {
   const [confirmRevision, setConfirmRevision] = useState<number | null>(null)
   const [diffRevision, setDiffRevision] = useState<number | null>(null)
+  const [promoteAfterRollback, setPromoteAfterRollback] = useState(false)
+  const [promotingFull, setPromotingFull] = useState(false)
 
   const handleClose = () => { setDiffRevision(null); onClose() }
+
+  // The dialog must not close while promote-full is still in flight, or a rollback
+  // that only half-landed reads as complete.
+  const busy = Boolean(isRollingBack) || promotingFull
+
+  const isRollout = isRolloutKind(kind)
+  const canPromoteAfterRollback = offersPromoteAfterRollback(kind, Boolean(onRolloutPromoteFull))
 
   const currentRevision = revisions?.find(r => r.isCurrent)
   const selectedRevision = revisions?.find(r => r.number === diffRevision)
@@ -904,7 +966,13 @@ export function RevisionHistoryDialog({ kind, namespace, name, open, onClose, re
     onRollback?.(
       { kind, namespace, name, revision },
       {
-        onSuccess: () => {
+        onSuccess: async () => {
+          if (canPromoteAfterRollback && promoteAfterRollback && onRolloutPromoteFull) {
+            await completePromoteAfterRollback(
+              () => onRolloutPromoteFull({ namespace, name }),
+              setPromotingFull,
+            )
+          }
           setConfirmRevision(null)
           setDiffRevision(null)
           onClose()
@@ -938,7 +1006,7 @@ export function RevisionHistoryDialog({ kind, namespace, name, open, onClose, re
     <DialogPortal
       open={open}
       onClose={handleClose}
-      closable={!isRollingBack}
+      closable={!busy}
       className="flex max-h-[85vh] w-[calc(100vw-2rem)] max-w-5xl flex-col"
     >
       <div className="flex items-center justify-between p-4 border-b border-theme-border shrink-0">
@@ -955,7 +1023,7 @@ export function RevisionHistoryDialog({ kind, namespace, name, open, onClose, re
         <Tooltip content="Close" delay={150}>
           <button
             onClick={handleClose}
-            disabled={isRollingBack}
+            disabled={busy}
             aria-label="Close revision history"
             className="p-1 text-theme-text-secondary hover:text-theme-text-primary hover:bg-theme-elevated rounded disabled:opacity-50"
           >
@@ -1036,22 +1104,27 @@ export function RevisionHistoryDialog({ kind, namespace, name, open, onClose, re
                             </button>
                           </Tooltip>
                         )}
-                        {rev.isCurrent ? (
-                          <span className="badge status-healthy">
-                            Current
-                          </span>
-                        ) : confirmRevision === rev.number ? (
+                        {revisionRoleBadges(rev, isRollout).map(({ label, tone, tip }) =>
+                          tip ? (
+                            <Tooltip key={label} content={tip} delay={150}>
+                              <span className={clsx('badge', tone)}>{label}</span>
+                            </Tooltip>
+                          ) : (
+                            <span key={label} className={clsx('badge', tone)}>{label}</span>
+                          )
+                        )}
+                        {rev.isCurrent ? null : confirmRevision === rev.number ? (
                           <>
                             <button
                               onClick={() => handleRollback(rev.number)}
-                              disabled={isRollingBack}
+                              disabled={busy}
                               className="px-2 py-0.5 text-xs font-medium text-white bg-amber-600 hover:bg-amber-700 rounded transition-colors disabled:opacity-50"
                             >
-                              {isRollingBack ? 'Rolling back...' : 'Confirm'}
+                              {promotingFull ? 'Promoting...' : isRollingBack ? 'Rolling back...' : 'Confirm'}
                             </button>
                             <button
                               onClick={() => setConfirmRevision(null)}
-                              disabled={isRollingBack}
+                              disabled={busy}
                               className="px-2 py-0.5 text-xs font-medium text-theme-text-secondary hover:text-theme-text-primary rounded transition-colors disabled:opacity-50"
                             >
                               Cancel
@@ -1084,10 +1157,22 @@ export function RevisionHistoryDialog({ kind, namespace, name, open, onClose, re
         )}
       </div>
 
-      <div className="flex items-center justify-end p-4 border-t border-theme-border shrink-0">
+      <div className="flex items-center justify-between gap-4 p-4 border-t border-theme-border shrink-0">
+        {canPromoteAfterRollback ? (
+          <label className="flex items-center gap-2 text-sm text-theme-text-secondary">
+            <input
+              type="checkbox"
+              checked={promoteAfterRollback}
+              onChange={(e) => setPromoteAfterRollback(e.target.checked)}
+              disabled={busy}
+              className="rounded border-theme-border"
+            />
+            Promote fully after rollback — skip pauses, steps, and analysis (emergency hotfix)
+          </label>
+        ) : <span />}
         <button
           onClick={handleClose}
-          disabled={isRollingBack}
+          disabled={busy}
           className="px-4 py-2 text-sm font-medium text-theme-text-secondary hover:text-theme-text-primary hover:bg-theme-elevated rounded-lg transition-colors disabled:opacity-50"
         >
           Close

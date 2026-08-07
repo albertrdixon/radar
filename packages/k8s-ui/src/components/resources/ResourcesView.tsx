@@ -79,6 +79,8 @@ import {
   getPVCCapacity,
   getPVCAccessModes,
   getRolloutStatus,
+  getAnalysisRunStatus,
+  summarizeAnalysisMetrics,
   getRolloutStrategy,
   getRolloutReady,
   getRolloutStep,
@@ -462,6 +464,14 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'strategy', label: 'Strategy', width: 'w-24' },
     { key: 'step', label: 'Step', width: 'w-20', hideOnMobile: true, tooltip: 'Current canary step / Total steps' },
     { key: 'images', label: 'Images', width: 'w-48', hideOnMobile: true },
+    { key: 'age', label: 'Age', width: 'w-24' },
+  ],
+  analysisruns: [
+    { key: 'name', label: 'Name' },
+    { key: 'namespace', label: 'Namespace', width: 'w-48' },
+    { key: 'status', label: 'Phase', width: 'w-28' },
+    { key: 'trigger', label: 'Trigger', width: 'w-32', tooltip: 'Which part of the Rollout started this run' },
+    { key: 'metrics', label: 'Metrics', width: 'w-40', hideOnMobile: true, tooltip: 'Per-metric verdicts' },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
   workflows: [
@@ -5692,6 +5702,8 @@ function CellContent({ resource, kind, column, group, majorityNodeMinorVersion, 
       return <PVCCell resource={resource} column={column} />
     case 'rollouts':
       return <RolloutCell resource={resource} column={column} />
+    case 'analysisruns':
+      return <AnalysisRunCell resource={resource} column={column} />
     case 'workflows':
       return <WorkflowCell resource={resource} column={column} />
     case 'cronworkflows':
@@ -7232,6 +7244,44 @@ function RolloutCell({ resource, column }: { resource: any; column: string }) {
       return (
         <Tooltip content={images.join('\n')}>
           <span className="text-sm text-theme-text-secondary truncate">{display}</span>
+        </Tooltip>
+      )
+    }
+    default:
+      return <span className="text-sm text-theme-text-tertiary">-</span>
+  }
+}
+
+function AnalysisRunCell({ resource, column }: { resource: any; column: string }) {
+  switch (column) {
+    case 'status': {
+      const status = getAnalysisRunStatus(resource)
+      return <span className={clsx('badge', status.color)}>{status.text}</span>
+    }
+    case 'trigger': {
+      const trigger = resource.metadata?.labels?.['rollout-type']
+      const step = resource.metadata?.labels?.['step-index']
+      if (!trigger) return <span className="text-sm text-theme-text-tertiary">-</span>
+      return (
+        <span className="text-sm text-theme-text-secondary">
+          {trigger}
+          {step ? ` (step ${step})` : ''}
+        </span>
+      )
+    }
+    case 'metrics': {
+      const results: any[] = resource.status?.metricResults || []
+      if (results.length === 0) return <span className="text-sm text-theme-text-tertiary">-</span>
+      const { total, passing, notPassing } = summarizeAnalysisMetrics(resource)
+      return (
+        <Tooltip
+          content={results
+            .map((m) => `${m.name}: ${m.phase || 'Unknown'}${m.dryRun ? ' (dry-run)' : ''}`)
+            .join('\n')}
+        >
+          <span className={clsx('text-sm', notPassing > 0 ? 'text-amber-400' : 'text-theme-text-secondary')}>
+            {notPassing > 0 ? `${notPassing}/${total} not passing` : `${passing}/${total} passing`}
+          </span>
         </Tooltip>
       )
     }
