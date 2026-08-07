@@ -98,7 +98,7 @@ A probe reports what *Radar's vantage* observed. Real traffic can flow fine whil
 - **NetworkPolicy.** A policy can allow real workload-to-workload traffic while blocking Radar's API-server-proxy identity (or the reverse). A failed probe next to healthy config is often this. The trace statically predicts a would-block from the caller-independent ingress rules, but the CNI is the only enforcement authority - so the prediction is confirmed or downgraded only by the live in-cluster probe.
 - **DNS split-horizon.** A probe resolves hostnames from *your* vantage, not the cluster's. An internal name that resolves inside the cluster may not resolve (or may resolve differently) from your laptop; those probes skip with a reason rather than failing.
 
-When config is healthy but a probe fails, suspect the vantage before the workload. Run the **in-cluster** test (or `diagnose(inCluster: true)`) to probe from the real dataplane, where mesh certs and in-cluster DNS apply.
+When config is healthy but a probe fails, suspect the vantage before the workload. Run the **in-cluster** test (or `diagnose(in_cluster: true)`) to probe from the real dataplane, where mesh certs and in-cluster DNS apply.
 
 ## Verdict semantics
 
@@ -134,7 +134,7 @@ The UI shows the verdict at the top of the panel with a one-sentence reason. Tre
 
 ## MCP
 
-The `diagnose` MCP tool returns a `trace` field for these kinds instead of the pod-log fan-out it does for workloads. An agent that calls `diagnose(kind=service, ...)` gets the path-shaped answer in one call, along with `relatedIssues` for raw-issue follow-up. Pass `probe: true` to add the active reachability test from Radar's vantage. Pass `inCluster: true` to run the probe from inside the cluster - Radar creates one short-lived, self-destructing probe pod under the caller's RBAC to test the real dataplane the API-server-proxy vantage can't reach (e.g. to confirm a route that came back `indirect`). This is the only mutating `diagnose` option; it needs `create jobs` + `list`/`get` pods RBAC, and falls back to a copyable command when pod-create is denied.
+The `diagnose` MCP tool returns a `trace` field for these kinds instead of the pod-log fan-out it does for workloads. An agent that calls `diagnose(kind=service, ...)` gets the path-shaped answer in one call, along with `relatedIssues` for raw-issue follow-up. Pass `probe: true` to add the active reachability test from Radar's vantage. Pass `in_cluster: true` to run the probe from inside the cluster - Radar creates one short-lived, self-destructing probe pod under the caller's RBAC to test the real dataplane the API-server-proxy vantage can't reach (e.g. to confirm a route that came back `indirect`). This is the only mutating `diagnose` option; it needs `create jobs` + `list`/`get` pods RBAC, and falls back to a copyable command when pod-create is denied.
 
 ## In-cluster probe image
 

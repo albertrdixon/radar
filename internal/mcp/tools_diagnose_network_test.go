@@ -137,22 +137,45 @@ func TestBuildNetworkDiagnoseResponse_DiagnosisExposed(t *testing.T) {
 	}
 }
 
-// TestInClusterParam_SelfExplanatory pins that the inCluster arg's schema teaches
+// The parameter was renamed from inCluster to in_cluster; agents that learned
+// the old spelling must keep working via generic orthographic repair.
+func TestInClusterAcceptsLegacyCamelCase(t *testing.T) {
+	registerToolsOnce(t)
+
+	fixed, _, unresolved := repairToolArgs("diagnose",
+		json.RawMessage(`{"kind":"service","namespace":"prod","name":"web","inCluster":true}`))
+	if len(unresolved) != 0 {
+		t.Fatalf("inCluster went unresolved: %v", unresolved)
+	}
+
+	var args map[string]any
+	if err := json.Unmarshal(fixed, &args); err != nil {
+		t.Fatal(err)
+	}
+	if args["in_cluster"] != true {
+		t.Fatalf("in_cluster not populated from the legacy spelling: %v", args)
+	}
+	if _, present := args["inCluster"]; present {
+		t.Fatalf("legacy spelling survived the repair: %v", args)
+	}
+}
+
+// TestInClusterParam_SelfExplanatory pins that the in_cluster arg's schema teaches
 // an agent WHAT it does, WHEN to use it, and that it CREATES a pod - so the agent
 // can decide for itself, not just be told a next step it can't take.
 func TestInClusterParam_SelfExplanatory(t *testing.T) {
 	var found string
 	for _, f := range reflect.VisibleFields(reflect.TypeOf(diagnoseInput{})) {
-		if f.Tag.Get("json") == "inCluster,omitempty" {
+		if f.Tag.Get("json") == "in_cluster,omitempty" {
 			found = f.Tag.Get("jsonschema")
 		}
 	}
 	if found == "" {
-		t.Fatal("diagnoseInput must have an inCluster field with a jsonschema description")
+		t.Fatal("diagnoseInput must have an in_cluster field with a jsonschema description")
 	}
 	for _, kw := range []string{"INSIDE the cluster", "pod", "confidence:indirect", "create"} {
 		if !strings.Contains(found, kw) {
-			t.Errorf("inCluster schema should mention %q so an agent knows what/when; got: %s", kw, found)
+			t.Errorf("in_cluster schema should mention %q so an agent knows what/when; got: %s", kw, found)
 		}
 	}
 }
