@@ -1,0 +1,50 @@
+# spec.workloadRef: the pod template lives on the Deployment, so rollback has
+# to patch the Deployment rather than the Rollout.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workloadref-target
+  namespace: demo-rollouts
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: workloadref
+  template:
+    metadata:
+      labels:
+        app: workloadref
+    spec:
+      containers:
+        - name: rollouts-demo
+          image: argoproj/rollouts-demo:purple
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 5m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: canary-workloadref
+  namespace: demo-rollouts
+spec:
+  replicas: 2
+  revisionHistoryLimit: 10
+  workloadRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: workloadref-target
+  selector:
+    matchLabels:
+      app: workloadref
+  strategy:
+    canary:
+      steps:
+        - setWeight: 50
+        - pause: {}

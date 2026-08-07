@@ -1,0 +1,43 @@
+# Pauses on InconclusiveAnalysisRun — the reason string that names nothing.
+# The AnalysisRun it points at carries the deciding metric.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: canary-analysis
+  namespace: demo-rollouts
+spec:
+  replicas: 3
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: canary-analysis
+  template:
+    metadata:
+      labels:
+        app: canary-analysis
+    spec:
+      containers:
+        - name: rollouts-demo
+          image: argoproj/rollouts-demo:blue
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 5m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+  strategy:
+    canary:
+      analysis:
+        templates:
+          - templateName: success-rate-pass
+        startingStep: 1
+      steps:
+        - setWeight: 20
+        - analysis:
+            templates:
+              - templateName: success-rate-inconclusive
+        - setWeight: 60
+        - pause: {}

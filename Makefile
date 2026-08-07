@@ -189,6 +189,22 @@ kyverno-demo-down:
 kyverno-demo-status:
 	./scripts/kyverno-demo.sh status
 
+# Bootstrap a kind cluster pre-loaded with Argo Rollouts scenarios
+# (paused canary, inconclusive analysis, blue-green, aborted, workloadRef).
+# Useful for visual-testing the Rollout control surface against real state.
+# See scripts/rollouts-demo/README.md for the full coverage matrix.
+rollouts-demo:
+	./scripts/rollouts-demo.sh up
+
+rollouts-demo-down:
+	./scripts/rollouts-demo.sh down
+
+rollouts-demo-status:
+	./scripts/rollouts-demo.sh status
+
+rollouts-demo-roll:
+	./scripts/rollouts-demo.sh roll
+
 # Bootstrap a kind cluster pre-loaded with curated Crossplane fixtures
 # (core + provider-kubernetes + function-patch-and-transform + XRD/Composition/XRs).
 # Useful for visual-testing Crossplane UI changes against realistic state.
@@ -368,6 +384,7 @@ help:
 	@echo "  make gitops-demo      - GitOps fixtures (Argo CD + Flux)"
 	@echo "  make crossplane-demo  - Crossplane fixtures"
 	@echo "  make kyverno-demo     - Live Kyverno policy + report fixtures"
+	@echo "  make rollouts-demo    - Argo Rollouts progression fixtures"
 	@echo "  make cnpg-demo        - Frozen CNPG rendering fixtures"
 	@echo "  make cnpg-demo-live   - CNPG fixtures with the operator running"
 	@echo ""

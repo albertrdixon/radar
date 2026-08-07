@@ -1,0 +1,66 @@
+# Manual pause: parks on CanaryPauseStep with Current != Stable, which is
+# the state Promote / Skip step / Promote full / Abort are all reachable in.
+# The demo script drives its revision history so Rollback has targets.
+apiVersion: v1
+kind: Service
+metadata:
+  name: canary-manual-stable
+  namespace: demo-rollouts
+spec:
+  selector:
+    app: canary-manual
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: canary-manual-canary
+  namespace: demo-rollouts
+spec:
+  selector:
+    app: canary-manual
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: canary-manual
+  namespace: demo-rollouts
+spec:
+  replicas: 4
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: canary-manual
+  template:
+    metadata:
+      labels:
+        app: canary-manual
+    spec:
+      containers:
+        - name: rollouts-demo
+          image: argoproj/rollouts-demo:blue
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 5m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+  strategy:
+    canary:
+      stableService: canary-manual-stable
+      canaryService: canary-manual-canary
+      steps:
+        - setWeight: 25
+        - pause: {}
+        - setWeight: 50
+        - pause: { duration: 30s }
+        - setWeight: 75
+        - pause: {}

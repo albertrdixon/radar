@@ -1,0 +1,59 @@
+# A static JSON endpoint so the web metric provider can produce every
+# AnalysisRun verdict without Prometheus. /mid.json satisfies neither the
+# success nor the failure condition, which is what yields Inconclusive.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: metric-fixtures
+  namespace: demo-rollouts
+data:
+  pass.json: '{"value": 1}'
+  fail.json: '{"value": 0}'
+  mid.json: '{"value": 2}'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metric-endpoint
+  namespace: demo-rollouts
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: metric-endpoint
+  template:
+    metadata:
+      labels:
+        app: metric-endpoint
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: fixtures
+              mountPath: /usr/share/nginx/html
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      volumes:
+        - name: fixtures
+          configMap:
+            name: metric-fixtures
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: metric-endpoint
+  namespace: demo-rollouts
+spec:
+  selector:
+    app: metric-endpoint
+  ports:
+    - port: 80
+      targetPort: 80

@@ -1,0 +1,72 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: success-rate-pass
+  namespace: demo-rollouts
+spec:
+  metrics:
+    - name: success-rate
+      interval: 20s
+      count: 3
+      successCondition: result == 1
+      failureCondition: result == 0
+      provider:
+        web:
+          url: http://metric-endpoint.demo-rollouts.svc.cluster.local/pass.json
+          jsonPath: "{$.value}"
+---
+# result == 2 matches neither condition, so every measurement lands
+# Inconclusive and the Rollout pauses for a human verdict.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: success-rate-inconclusive
+  namespace: demo-rollouts
+spec:
+  metrics:
+    - name: success-rate
+      interval: 30s
+      count: 2
+      successCondition: result == 1
+      failureCondition: result == 0
+      provider:
+        web:
+          url: http://metric-endpoint.demo-rollouts.svc.cluster.local/mid.json
+          jsonPath: "{$.value}"
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: success-rate-fail
+  namespace: demo-rollouts
+spec:
+  metrics:
+    - name: success-rate
+      interval: 20s
+      count: 2
+      successCondition: result == 1
+      failureCondition: result == 0
+      provider:
+        web:
+          url: http://metric-endpoint.demo-rollouts.svc.cluster.local/fail.json
+          jsonPath: "{$.value}"
+---
+apiVersion: argoproj.io/v1alpha1
+kind: ClusterAnalysisTemplate
+metadata:
+  name: radar-demo-smoke-test
+spec:
+  metrics:
+    - name: smoke-test
+      count: 1
+      provider:
+        job:
+          spec:
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: smoke
+                    image: busybox:1.36
+                    command: [sh, -c, "echo smoke test ok"]

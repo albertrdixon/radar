@@ -1,0 +1,62 @@
+# blueGreen with autoPromotionEnabled: false parks on BlueGreenPause with
+# activeSelector != previewSelector. Skip step must NOT appear here.
+apiVersion: v1
+kind: Service
+metadata:
+  name: bluegreen-active
+  namespace: demo-rollouts
+spec:
+  selector:
+    app: bluegreen
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bluegreen-preview
+  namespace: demo-rollouts
+spec:
+  selector:
+    app: bluegreen
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: bluegreen
+  namespace: demo-rollouts
+spec:
+  replicas: 2
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: bluegreen
+  template:
+    metadata:
+      labels:
+        app: bluegreen
+    spec:
+      containers:
+        - name: rollouts-demo
+          image: argoproj/rollouts-demo:green
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 5m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+  strategy:
+    blueGreen:
+      activeService: bluegreen-active
+      previewService: bluegreen-preview
+      autoPromotionEnabled: false
+      prePromotionAnalysis:
+        templates:
+          - templateName: success-rate-pass
