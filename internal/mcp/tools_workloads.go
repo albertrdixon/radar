@@ -16,21 +16,37 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/client-go/dynamic"
 
 	"github.com/skyhook-io/radar/internal/k8s"
 	aicontext "github.com/skyhook-io/radar/pkg/ai/context"
 	"github.com/skyhook-io/radar/pkg/k8score"
+	"github.com/skyhook-io/radar/pkg/rollouts"
 )
 
 // Workload tool input types
 
 type manageWorkloadInput struct {
 	Action    string `json:"action" jsonschema:"action to perform: restart, scale, or rollback"`
-	Kind      string `json:"kind" jsonschema:"workload kind: deployment, statefulset, or daemonset"`
+	Kind      string `json:"kind" jsonschema:"workload kind: deployment, statefulset, daemonset, or rollout"`
 	Namespace string `json:"namespace" jsonschema:"workload namespace"`
 	Name      string `json:"name" jsonschema:"workload name"`
 	Replicas  *int32 `json:"replicas,omitempty" jsonschema:"target replica count (required for scale)"`
-	Revision  *int64 `json:"revision,omitempty" jsonschema:"target revision number (required for rollback)"`
+	Revision  *int64 `json:"revision,omitempty" jsonschema:"target revision number (required for rollback); enumerate valid values with get_resource include=revisions"`
+}
+
+type manageRolloutInput struct {
+	Action    string `json:"action" jsonschema:"action to perform: abort (revert traffic to stable now), retry (clear an abort), promote (advance one step), promote-full (skip all remaining steps/pauses/analysis), or skip-step (advance exactly one canary step)"`
+	Namespace string `json:"namespace" jsonschema:"rollout namespace"`
+	Name      string `json:"name" jsonschema:"rollout name"`
+}
+
+var rolloutActions = map[string]func(context.Context, dynamic.Interface, string, string) (rollouts.OperationResult, error){
+	"abort":        rollouts.Abort,
+	"retry":        rollouts.Retry,
+	"promote":      rollouts.Promote,
+	"promote-full": rollouts.PromoteFull,
+	"skip-step":    rollouts.SkipCurrentStep,
 }
 
 type manageCronJobInput struct {
@@ -78,7 +94,7 @@ func parseLogsSince(s string) (*int64, error) {
 func handleManageWorkload(ctx context.Context, req *mcp.CallToolRequest, input manageWorkloadInput) (*mcp.CallToolResult, any, error) {
 	kind := normalizeWorkloadKind(input.Kind)
 	if kind == "" {
-		return nil, nil, fmt.Errorf("invalid kind %q: must be deployment, statefulset, or daemonset", input.Kind)
+		return nil, nil, fmt.Errorf("invalid kind %q: must be deployment, statefulset, daemonset, or rollout", input.Kind)
 	}
 
 	dynClient := k8s.DynamicClientFromContext(ctx)
@@ -119,20 +135,56 @@ func handleManageWorkload(ctx context.Context, req *mcp.CallToolRequest, input m
 
 	case "rollback":
 		if input.Revision == nil {
-			return nil, nil, fmt.Errorf("revision is required for rollback action")
+			return nil, nil, fmt.Errorf("revision is required for rollback action (list valid numbers with get_resource include=revisions)")
 		}
 		if err := k8s.RollbackWorkloadWithClient(ctx, kind, input.Namespace, input.Name, *input.Revision, dynClient); err != nil {
 			return nil, nil, fmt.Errorf("rollback failed: %w", err)
 		}
-		return toJSONResult(map[string]any{
+		resp := map[string]any{
 			"status":   "ok",
 			"message":  fmt.Sprintf("Rolled back %s %s/%s to revision %d", kind, input.Namespace, input.Name, *input.Revision),
 			"revision": *input.Revision,
-		})
+		}
+		if kind == "rollouts" {
+			resp["note"] = "This starts a new rollout of the old template — every canary step, pause, and analysis re-runs. " +
+				"Use manage_rollout action=promote-full to skip them, or action=abort to revert traffic immediately instead."
+		}
+		return toJSONResult(resp)
 
 	default:
 		return nil, nil, fmt.Errorf("unknown action %q: must be restart, scale, or rollback", input.Action)
 	}
+}
+
+func handleManageRollout(ctx context.Context, req *mcp.CallToolRequest, input manageRolloutInput) (*mcp.CallToolResult, any, error) {
+	dynClient := k8s.DynamicClientFromContext(ctx)
+	if dynClient == nil {
+		return nil, nil, errNotConnected()
+	}
+
+	action := strings.ToLower(strings.TrimSpace(input.Action))
+	op, ok := rolloutActions[action]
+	if !ok {
+		return nil, nil, fmt.Errorf("unknown action %q: must be abort, retry, promote, promote-full, or skip-step", input.Action)
+	}
+
+	result, err := op(ctx, dynClient, input.Namespace, input.Name)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s failed: %w", action, err)
+	}
+
+	resp := map[string]any{
+		"status":    "ok",
+		"message":   result.Message,
+		"operation": result.Operation,
+	}
+	if result.StepIndex != nil {
+		resp["stepIndex"] = *result.StepIndex
+	}
+	if action == "abort" {
+		resp["note"] = "The Rollout stays aborted until manage_rollout action=retry, or a new revision is pushed."
+	}
+	return toJSONResult(resp)
 }
 
 func handleManageCronJob(ctx context.Context, req *mcp.CallToolRequest, input manageCronJobInput) (*mcp.CallToolResult, any, error) {
@@ -713,6 +765,8 @@ func normalizeWorkloadKind(kind string) string {
 		return "statefulsets"
 	case "daemonset", "daemonsets":
 		return "daemonsets"
+	case "rollout", "rollouts":
+		return "rollouts"
 	default:
 		return ""
 	}

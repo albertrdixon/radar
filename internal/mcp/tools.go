@@ -496,12 +496,30 @@ func registerTools(server *mcp.Server, includeWrites bool) {
 
 	addTool(server, &mcp.Tool{
 		Name: "manage_workload",
-		Description: "Perform operations on a Kubernetes workload (Deployment, StatefulSet, or DaemonSet). " +
+		Description: "Perform operations on a Kubernetes workload (Deployment, StatefulSet, DaemonSet, or Argo Rollout). " +
 			"Supported actions: 'restart' triggers a rolling restart, 'scale' changes the replica count " +
 			"(requires 'replicas' parameter), 'rollback' reverts to a previous revision " +
-			"(requires 'revision' parameter). Use list_resources or get_dashboard first to identify the target.",
+			"(requires 'revision'; enumerate valid numbers with get_resource include=revisions). " +
+			"Use list_resources or get_dashboard first to identify the target. " +
+			"On a Rollout, 'rollback' rewrites the pod template and so starts a NEW rollout that re-runs every " +
+			"canary step, pause, and analysis — to revert traffic now use manage_rollout abort, or follow the " +
+			"rollback with manage_rollout promote-full.",
 		Annotations: writeTool,
 	}, logToolCall("manage_workload", handleManageWorkload))
+
+	addTool(server, &mcp.Tool{
+		Name: "manage_rollout",
+		Description: "Drive an Argo Rollout's progressive delivery (the verbs with no Deployment equivalent). " +
+			"'abort' reverts traffic to the last stable version at once without touching spec, and stays " +
+			"aborted until retried — the incident-response verb; " +
+			"'retry' clears an abort; 'promote' clears the current pause to advance one step; " +
+			"'promote-full' skips ALL remaining steps, pauses, and analysis (emergency hotfix); " +
+			"'skip-step' advances exactly one canary step (canary only). " +
+			"For rollback, restart, or scale use manage_workload with kind=rollout. " +
+			"A Rollout paused on InconclusiveAnalysisRun names its AnalysisRun in " +
+			"status.canary/blueGreen — get_resource kind=AnalysisRun for the deciding metric before choosing a verb.",
+		Annotations: writeTool,
+	}, logToolCall("manage_rollout", handleManageRollout))
 
 	addTool(server, &mcp.Tool{
 		Name: "manage_cronjob",
@@ -593,7 +611,7 @@ type getResourceInput struct {
 	Group     string `json:"group,omitempty" jsonschema:"API group when the kind is ambiguous (e.g. cluster.x-k8s.io for CAPI Cluster vs CNPG Cluster)"`
 	Namespace string `json:"namespace,omitempty" jsonschema:"namespace for namespaced kinds. Leave empty for cluster-scoped kinds (Node, ClusterRole, ClusterRoleBinding, IngressClass, PriorityClass, StorageClass, etc.)."`
 	Name      string `json:"name" jsonschema:"resource name"`
-	Include   string `json:"include,omitempty" jsonschema:"optional supplemental data after narrowing to this object: events, metrics, changes. include=changes follows the existing comma-separated include pattern. Separate from context. For logs use get_pod_logs / get_workload_logs (container, previous, since, grep) or diagnose for the full workload bundle."`
+	Include   string `json:"include,omitempty" jsonschema:"optional supplemental data after narrowing to this object: events, metrics, changes, revisions. Comma-separated. Separate from context. include=revisions lists rollback targets for Deployment/StatefulSet/DaemonSet/Rollout (number, image, isCurrent; Rollouts also mark isStable, the revision an abort reverts to) — fetch before manage_workload rollback. For logs use get_pod_logs / get_workload_logs (container, previous, since, grep) or diagnose for the full workload bundle."`
 	Context   string `json:"context,omitempty" jsonschema:"resourceContext tier: 'basic' (default; attaches managedBy / exposes / selectedBy / uses / runsOn / issueSummary / auditSummary rollups) or 'none' (bare minified resource). issueSummary uses live-operational critical|warning; auditSummary uses the Checks posture-remediation ladder critical|high|medium|low (current built-ins high|medium) and is not evidence of an active outage. For full diagnostic tier with logs + events bundled, use the diagnose tool instead."`
 }
 
@@ -1228,6 +1246,21 @@ func attachResourceExtras(ctx context.Context, cache *k8s.ResourceCache, result 
 		}
 	}
 
+	// Rollback targets are unusable without this: an agent cannot name a revision
+	// it has no way to enumerate.
+	if includes["revisions"] {
+		if !revisionCapableKind(kind) {
+			result["revisionsError"] = fmt.Sprintf("revision history is not available for %s (Deployment, StatefulSet, DaemonSet, Rollout only)", kind)
+		} else if dynClient := k8s.DynamicClientFromContext(ctx); dynClient == nil {
+			result["revisionsError"] = "cluster client unavailable"
+		} else if revisions, err := k8s.ListWorkloadRevisionsWithClient(ctx, kind, namespace, name, dynClient); err != nil {
+			log.Printf("[mcp] Failed to list revisions for %s/%s/%s: %v", kind, namespace, name, err)
+			result["revisionsError"] = err.Error()
+		} else {
+			result["revisions"] = revisions
+		}
+	}
+
 	// include=logs was dropped from get_resource (it was Pod-only and lacked
 	// container/previous/since/grep). Signal it explicitly rather than silently
 	// no-op'ing, so a client on a stale schema is redirected instead of seeing
@@ -1243,16 +1276,25 @@ func attachResourceExtras(ctx context.Context, cache *k8s.ResourceCache, result 
 	var unknown []string
 	for tok := range includes {
 		switch tok {
-		case "events", "metrics", "logs", "changes":
+		case "events", "metrics", "logs", "changes", "revisions":
 		default:
 			unknown = append(unknown, tok)
 		}
 	}
 	if len(unknown) > 0 {
 		sort.Strings(unknown)
-		result["includeError"] = fmt.Sprintf("unknown include value(s): %s (valid: events, metrics, changes)", strings.Join(unknown, ", "))
+		result["includeError"] = fmt.Sprintf("unknown include value(s): %s (valid: events, metrics, changes, revisions)", strings.Join(unknown, ", "))
 	}
 
+}
+
+func revisionCapableKind(kind string) bool {
+	switch k8score.NormalizeWorkloadKind(strings.ToLower(kind)) {
+	case "deployments", "statefulsets", "daemonsets", "rollouts":
+		return true
+	default:
+		return false
+	}
 }
 
 // normalizeDisplayKind converts a lowercase kind to its display form for matching

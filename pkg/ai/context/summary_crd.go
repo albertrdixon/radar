@@ -19,6 +19,8 @@ func summarizeUnstructured(obj *unstructured.Unstructured) *ResourceSummary {
 		return summarizeArgoApp(obj)
 	case group == "argoproj.io" && kind == "Rollout":
 		return summarizeArgoRollout(obj)
+	case group == "argoproj.io" && kind == "AnalysisRun":
+		return summarizeArgoAnalysisRun(obj)
 	case group == "kustomize.toolkit.fluxcd.io" && kind == "Kustomization":
 		return summarizeFluxKustomization(obj)
 	case group == "helm.toolkit.fluxcd.io" && kind == "HelmRelease":
@@ -292,6 +294,94 @@ func summarizeArgoRollout(obj *unstructured.Unstructured) *ResourceSummary {
 	replicas, _, _ := unstructured.NestedInt64(obj.Object, "spec", "replicas")
 	if replicas > 0 {
 		s.Ready = formatInt64Pair(readyReplicas, replicas)
+	}
+
+	s.Issue = rolloutBlockReason(obj)
+
+	return s
+}
+
+// A bare "Paused" phase tells an agent nothing actionable — the pause reason
+// and the analysis verdict decide whether to promote, abort, or wait.
+func rolloutBlockReason(obj *unstructured.Unstructured) string {
+	if aborted, _, _ := unstructured.NestedBool(obj.Object, "status", "abort"); aborted {
+		return "aborted; traffic is on the stable revision — retry or roll back"
+	}
+
+	var reasons []string
+	pauseConditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "pauseConditions")
+	for _, raw := range pauseConditions {
+		condition, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if reason, ok := condition["reason"].(string); ok && reason != "" {
+			reasons = append(reasons, reason)
+		}
+	}
+
+	for _, path := range [][]string{
+		{"status", "canary", "currentStepAnalysisRunStatus"},
+		{"status", "canary", "currentBackgroundAnalysisRunStatus"},
+		{"status", "blueGreen", "prePromotionAnalysisRunStatus"},
+		{"status", "blueGreen", "postPromotionAnalysisRunStatus"},
+	} {
+		phase, _, _ := unstructured.NestedString(obj.Object, append(path, "status")...)
+		switch phase {
+		case "Failed", "Error", "Inconclusive":
+			name, _, _ := unstructured.NestedString(obj.Object, append(path, "name")...)
+			reasons = append(reasons, fmt.Sprintf("analysis %s (AnalysisRun %s)", strings.ToLower(phase), name))
+		}
+	}
+
+	if len(reasons) == 0 {
+		// Progressing narrates ordinary work here ("more replicas need to be
+		// updated"), so only a stuck phase makes status.message an issue.
+		if phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase"); phase != "Degraded" && phase != "Paused" {
+			return ""
+		}
+		message, _, _ := unstructured.NestedString(obj.Object, "status", "message")
+		return message
+	}
+	return strings.Join(reasons, "; ")
+}
+
+func summarizeArgoAnalysisRun(obj *unstructured.Unstructured) *ResourceSummary {
+	s := &ResourceSummary{
+		Kind:      "AnalysisRun",
+		Name:      obj.GetName(),
+		Namespace: obj.GetNamespace(),
+		Age:       age(obj.GetCreationTimestamp().Time),
+	}
+
+	s.Status, _, _ = unstructured.NestedString(obj.Object, "status", "phase")
+	s.Type = obj.GetLabels()["rollout-type"]
+
+	var failing []string
+	metricResults, _, _ := unstructured.NestedSlice(obj.Object, "status", "metricResults")
+	for _, raw := range metricResults {
+		metric, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		// Argo keeps dryRun metrics out of the run's verdict, so naming one as the
+		// failure would have an agent abort a rollout the controller called healthy.
+		if dryRun, _ := metric["dryRun"].(bool); dryRun {
+			continue
+		}
+		phase, _ := metric["phase"].(string)
+		switch phase {
+		case "Failed", "Error", "Inconclusive":
+			name, _ := metric["name"].(string)
+			failing = append(failing, fmt.Sprintf("%s %s", name, strings.ToLower(phase)))
+		}
+	}
+
+	switch {
+	case len(failing) > 0:
+		s.Issue = strings.Join(failing, "; ")
+	default:
+		s.Issue, _, _ = unstructured.NestedString(obj.Object, "status", "message")
 	}
 
 	return s

@@ -52,13 +52,13 @@ export const MCP_TOOL_CATALOG: MCPToolInfo[] = [
   },
   {
     name: 'get_resource',
-    desc: 'A single resource: minified spec/status/metadata plus resourceContext (relationships, refs, issue/audit/policy rollups). Optionally include heavier event/metrics data.',
+    desc: 'A single resource: minified spec/status/metadata plus resourceContext (relationships, refs, issue/audit/policy rollups). Optionally include heavier event/metrics/change/revision data.',
     params: [
       { arg: 'kind', required: true, desc: 'resource kind, e.g. pod, deployment, service' },
       { arg: 'name', required: true, desc: 'resource name' },
       { arg: 'namespace', desc: 'omit for cluster-scoped kinds (Node, ClusterRole, IngressClass, etc.)' },
       { arg: 'group', desc: 'API group when the kind is ambiguous (e.g. serving.knative.dev for Knative Service vs core Service)' },
-      { arg: 'include', desc: 'events, metrics' },
+      { arg: 'include', desc: 'events, metrics, changes, revisions (rollback targets for Deployment/StatefulSet/DaemonSet/Rollout)' },
       { arg: 'context', desc: 'resourceContext tier: basic (default) or none' },
     ],
   },
@@ -260,14 +260,24 @@ export const MCP_TOOL_CATALOG: MCPToolInfo[] = [
   {
     name: 'manage_workload',
     write: true,
-    desc: 'Operate on a workload: restart triggers a rolling restart, scale changes the replica count, rollback reverts to a previous revision.',
+    desc: 'Operate on a workload: restart triggers a rolling restart, scale changes the replica count, rollback reverts to a previous revision. Rollout rollback re-runs every canary step — pair it with manage_rollout promote-full, or abort instead.',
     params: [
       { arg: 'action', required: true, desc: 'restart, scale, or rollback' },
-      { arg: 'kind', required: true, desc: 'deployment, statefulset, or daemonset' },
+      { arg: 'kind', required: true, desc: 'deployment, statefulset, daemonset, or rollout' },
       { arg: 'namespace', required: true, desc: 'workload namespace' },
       { arg: 'name', required: true, desc: 'workload name' },
       { arg: 'replicas', desc: 'target replica count (for scale)' },
-      { arg: 'revision', desc: 'target revision (for rollback)' },
+      { arg: 'revision', desc: 'target revision (for rollback); list them with get_resource include=revisions' },
+    ],
+  },
+  {
+    name: 'manage_rollout',
+    write: true,
+    desc: 'Control an Argo Rollout progressive delivery: abort reverts traffic to the last stable version immediately, retry clears an abort, promote advances one step, promote-full skips all remaining steps/pauses/analysis, skip-step advances exactly one canary step. A Rollout paused on an inconclusive analysis names its AnalysisRun in status — read that first.',
+    params: [
+      { arg: 'action', required: true, desc: 'abort, retry, promote, promote-full, or skip-step' },
+      { arg: 'namespace', required: true, desc: 'rollout namespace' },
+      { arg: 'name', required: true, desc: 'rollout name' },
     ],
   },
   {
