@@ -144,7 +144,8 @@ Use `/visual-test` command for the full workflow (cluster check, Playwright MCP,
 - WebSocket: `/api/pods/{ns}/{name}/exec`
 - MCP: `/mcp` (Streamable HTTP — POST for JSON-RPC, GET for SSE)
 - Helm: `/api/helm/releases/...`
-- Workloads: `/api/workloads/{kind}/{ns}/{name}/...` (logs, restart, scale, rollback)
+- Workloads: `/api/workloads/{kind}/{ns}/{name}/...` (logs, restart, scale, revisions, rollback) — `revisions`/`rollback` accept Deployment, StatefulSet, DaemonSet, and **Rollout**; `rollbackableWorkloadKinds` in `server.go` is the gate
+- Argo Rollouts: `/api/rollouts/{ns}/{name}/{abort,retry,promote,promote-full,skip-step}` (POST) + `/api/rollouts/{ns}/{name}/capabilities` (GET). Rollback/history deliberately live on the `/workloads` routes above (same operation shape, shared revision UI). The status verbs patch the `rollouts/status` subresource, so capabilities SAR `rollouts` **and** `rollouts/status` separately — `patch rollouts` does not imply `patch rollouts/status`. Engine in `pkg/rollouts`, handlers in `internal/server/rollouts_handlers.go`
 - GitOps controller actions: `/api/argo/applications/...` (sync, refresh, terminate, suspend, resume, rollback, selective-sync), `/api/flux/{kind}/...` (reconcile, suspend, resume, sync-with-source)
 - Argo CD API integration: `PUT /api/integrations/argocd` (URL/token, probe-before-persist, token preserved across GET-redaction round-trips); `/api/argo/applications/{ns}/{name}/resource-diff` (Git-rendered desired vs live via argocd-server managed-resources; dual RBAC gate + structural Secret redaction; see docs/gitops.md)
 - GitOps detail data: `/api/gitops/tree/{kind}/{ns}/{name}` (resource tree + ownership edges), `/api/gitops/insights/{kind}/{ns}/{name}` (curated diagnosis: summary + issues + drift + events + plan + history + capabilities)
@@ -215,7 +216,7 @@ Pod **Permissions** is the differentiator — frames the SA's grant as blast rad
 
 ### MCP Server
 
-Stateless HTTP at `/mcp` (JSON-RPC). Read tools use `readOnlyHint`, write tools use `destructiveHint: true`. Respects cluster RBAC (impersonates via `DynamicClientFromContext` for write/exec/logs). Enabled by default; `--no-mcp` to disable. Tool catalogue + design rationale lives in `internal/mcp/tools.go` + [docs/mcp.md](docs/mcp.md) — don't restate it here. **When adding/removing a tool in `registerTools`, also update the user-facing setup dialog catalog `web/src/components/home/mcpToolCatalog.ts`** — `TestSetupDialogCoversAllTools` fails CI if the two diverge.
+Stateless HTTP at `/mcp` (JSON-RPC). Read tools use `readOnlyHint`, write tools use `destructiveHint: true`. Respects cluster RBAC (impersonates via `DynamicClientFromContext` for write/exec/logs). Enabled by default; `--no-mcp` to disable. Tool catalogue + design rationale lives in `internal/mcp/tools.go` + [docs/mcp.md](docs/mcp.md) — don't restate it here. **When adding/removing a tool in `registerTools`, also update the user-facing setup dialog catalog `web/src/components/home/mcpToolCatalog.ts`** — `TestSetupDialogCoversAllTools` fails CI if the two diverge. A **write** tool additionally needs adding to both write-tool lists in `internal/mcp/tools_catalog_test.go` (`writeTools` in `TestRegisteredToolAnnotations` and `writeToolNames`) — the second is what keeps it out of the read-only mount. New tools also consume the `maxCatalogBytes` description budget; raise it deliberately rather than gutting routing guidance.
 
 ### Error Handling (Backend)
 
