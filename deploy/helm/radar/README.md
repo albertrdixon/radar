@@ -254,7 +254,7 @@ This overrides individual settings below. Simpler but broader — some orgs may 
 | `awx` | `awx.ansible.com` |
 | `certManager` | `cert-manager.io`, `acme.cert-manager.io` |
 | `cilium` | `cilium.io` |
-| `cloudnativePg` | `postgresql.cnpg.io` |
+| `cloudnativePg` | `postgresql.cnpg.io`, `barmancloud.cnpg.io` |
 | `clusterApi` | `cluster.x-k8s.io`, `infrastructure.cluster.x-k8s.io`, `controlplane.cluster.x-k8s.io`, `bootstrap.cluster.x-k8s.io`, `addons.cluster.x-k8s.io` |
 | `contour` | `projectcontour.io` |
 | `crossplane` | `crossplane.io`, `pkg.crossplane.io`, `apiextensions.crossplane.io`, `helm.crossplane.io`, `kubernetes.crossplane.io`. For Upbound provider groups (e.g. `s3.aws.upbound.io`, `compute.gcp.upbound.io`) use `additionalCrdGroups` — K8s RBAC has no apiGroup wildcards. |

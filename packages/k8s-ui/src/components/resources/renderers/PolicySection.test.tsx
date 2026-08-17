@@ -64,14 +64,26 @@ describe('PolicySection — what an empty result means', () => {
 describe('PolicySection — partial coverage', () => {
   it('admits when some report families were unreadable, even while passing', () => {
     // "All checks passing" plus an unreadable family is a claim of coverage we
-    // do not have.
+    // do not have. The note alone does not undo it — "All" is the word that gets
+    // read, and the note is the small print under a green shield.
     const html = renderToString(<PolicySection data={resp({
       counts: { pass: 3, fail: 0, warn: 0, error: 0, skip: 0 },
       deniedGroups: ['openreports.io'],
     })} />)
-    expect(html).toContain('All 3 checks passing')
+    expect(html).toContain('3 checks passing')
+    expect(html).not.toContain('All 3 checks passing')
     expect(html).toContain('may be incomplete')
     expect(html).toContain('openreports.io')
+  })
+
+  // Staleness dates the answer, it does not shrink it: "as of the last sync, all
+  // passed" is still a true sentence, so this one keeps the word.
+  it('still says all passed when the only caveat is a frozen index', () => {
+    const html = renderToString(<PolicySection data={resp({
+      counts: { pass: 3, fail: 0, warn: 0, error: 0, skip: 0 }, liveUpdates: false,
+    })} />)
+    expect(html).toContain('All 3 checks passing')
+    expect(html).toContain('not updating live')
   })
 
   it('admits when the results are frozen', () => {
@@ -98,5 +110,50 @@ describe('PolicySection — request states', () => {
     const html = renderToString(<PolicySection data={null} error={new Error('connection reset')} />)
     expect(html).toContain('connection reset')
     expect(html).toContain('text-red')
+  })
+})
+
+/**
+ * Findings the caller may not read are dropped from `findings` AND from
+ * `counts`, so the screen has nothing left to reveal that anything is missing.
+ * A resource whose only failure came from a report family this identity cannot
+ * read then renders as passing everything — an all-clear on a security surface,
+ * derived from an answer that was never fully asked.
+ */
+describe('when results were withheld from this caller', () => {
+  const withheld: PolicyResourceResponse = {
+    ...base,
+    counts: { pass: 3, fail: 0, warn: 0, error: 0, skip: 0 },
+    findings: [],
+    withheldByFamily: 1,
+  }
+
+  it('does not claim everything passed', () => {
+    const html = renderToString(<PolicySection data={withheld} />)
+    expect(html).not.toContain('All 3 checks passing')
+    expect(html).toContain('3 checks passing')
+  })
+
+  it('says what is missing and why', () => {
+    const html = renderToString(<PolicySection data={withheld} />)
+    expect(html).toContain('not shown here')
+    expect(html).toContain('permission')
+  })
+
+  it('agrees in number', () => {
+    const html = renderToString(
+      <PolicySection data={{ ...withheld, withheldByFamily: 2 }} />,
+    )
+    expect(html).toContain('2 results are not shown')
+  })
+
+  // The ordinary case must keep its plain claim — the note only appears when
+  // something was actually held back.
+  it('still claims all-clear when nothing was withheld', () => {
+    const html = renderToString(
+      <PolicySection data={{ ...base, counts: { ...base.counts, pass: 3 } }} />,
+    )
+    expect(html).toContain('All 3 checks passing')
+    expect(html).not.toContain('not shown here')
   })
 })

@@ -154,14 +154,17 @@ import { ScaledObjectCell, ScaledJobCell, TriggerAuthenticationCell, ClusterTrig
 import { ResourceClaimCell, ResourceClaimTemplateCell, DeviceClassCell, ResourceSliceCell } from './renderers/dra-cells'
 import { NvidiaClusterPolicyCell, NvidiaDriverCell } from './renderers/nvidia-cells'
 import { ServiceMonitorCell, PrometheusRuleCell, PodMonitorCell } from './renderers/prometheus-cells'
-import { PolicyReportCell, ClusterPolicyReportCell, KyvernoPolicyCell, ClusterPolicyCell } from './renderers/kyverno-cells'
+import { PolicyReportCell, ClusterPolicyReportCell, KyvernoPolicyCell, ClusterPolicyCell,
+  KyvernoUpdateRequestCell,
+  KyvernoEphemeralReportCell,
+} from './renderers/kyverno-cells'
 import { KyvernoModernPolicyCell, KyvernoPolicyExceptionCell, KyvernoCleanupPolicyCell } from './renderers/kyverno-modern-cells'
 import { KYVERNO_MODERN_PLURALS, isModernKyvernoPolicy } from './resource-utils-kyverno-modern'
 import { isAnyKyvernoPolicyException } from './resource-utils-kyverno-exceptions'
 import { ExternalSecretCell, ClusterExternalSecretCell, SecretStoreCell, ClusterSecretStoreCell } from './renderers/eso-cells'
 import { BackupCell, RestoreCell, ScheduleCell, BackupStorageLocationCell, VolumeSnapshotLocationCell, BackupRepositoryCell } from './renderers/velero-cells'
 import { isVeleroResource } from './resource-utils-velero'
-import { CNPGClusterCell, CNPGBackupCell, CNPGScheduledBackupCell, CNPGPoolerCell } from './renderers/cnpg-cells'
+import { CNPGClusterCell, CNPGBackupCell, CNPGScheduledBackupCell, CNPGPoolerCell, CNPGObjectStoreCell, CNPGDeclarativeCell, CNPGImageCatalogCell } from './renderers/cnpg-cells'
 import { isApiGroup, CNPG_GROUP } from './resource-utils-cnpg'
 import { ManagedResourceCell, CompositeResourceCell, CrossplaneProviderCell, CrossplaneProviderConfigCell, CompositionCell, XRDCell } from './renderers/crossplane-cells'
 import { isManagedResource, isComposite } from './resource-utils-crossplane'
@@ -276,10 +279,14 @@ function buildCustomColumn(d: CustomColumnDef): ExtraColumn {
 }
 
 // Tailwind width class → pixel minimum mapping for CSS Grid column sizing
+// A width class missing from this map falls back to 80px, and nothing says so —
+// the column just renders narrow enough to truncate its header. Keep the whole
+// Tailwind step range present rather than only the sizes in use today.
 const TAILWIND_WIDTH_TO_PX: Record<string, number> = {
   'w-12': 48, 'w-14': 56, 'w-16': 64, 'w-20': 80, 'w-24': 96,
   'w-28': 112, 'w-32': 128, 'w-36': 144, 'w-40': 160, 'w-44': 176,
-  'w-48': 192, 'w-56': 224, 'w-64': 256,
+  'w-48': 192, 'w-52': 208, 'w-56': 224, 'w-60': 240, 'w-64': 256,
+  'w-72': 288, 'w-80': 320, 'w-96': 384,
 }
 
 const COMPARE_COLUMN_WIDTH = 36
@@ -298,6 +305,30 @@ function getColumnMinWidth(col: Column): number {
 }
 
 // Default columns for unknown resource types (CRDs)
+/**
+ * Why a list of this kind being empty is not the answer it looks like.
+ *
+ * Kyverno's two working records are garbage-collected within seconds of
+ * finishing, so "none" is the resting state of a healthy cluster — and for
+ * UpdateRequest it is ALSO what you see when a generate rule never fired at
+ * all. Those are opposite conclusions and a bare "No X found" renders them
+ * identically.
+ */
+export function emptyKindNote(kind: string, group?: string, unfilteredTotal = 0): string | undefined {
+  // A search or column filter emptying the table is the reader's own doing.
+  // Explaining that none is the resting state then answers a question they did
+  // not ask, while their own term is still in the box.
+  if (unfilteredTotal > 0) return undefined
+  const g = group ?? ''
+  if (kind.toLowerCase() === 'updaterequest' && g === 'kyverno.io') {
+    return 'These are deleted seconds after the work completes, so none is the normal resting state. It also looks like this if a generate or mutate-existing rule never ran — check the policy itself to tell the two apart.'
+  }
+  if ((kind.toLowerCase() === 'ephemeralreport' || kind.toLowerCase() === 'clusterephemeralreport') && g === 'reports.kyverno.io') {
+    return 'These exist only between a background scan and the PolicyReport it becomes, so none means the scan has finished rather than that nothing was checked.'
+  }
+  return undefined
+}
+
 const DEFAULT_COLUMNS: Column[] = [
   { key: 'name', label: 'Name' },
   { key: 'namespace', label: 'Namespace', width: 'w-48' },
@@ -1315,6 +1346,92 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     // than an absent one — the reader can't tell which meaning they're getting.
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
+  // `databases`, `publications` and `subscriptions` are crowded plurals — other
+  // database operators ship all three, and Knative owns the unqualified
+  // `subscriptions` set. Keyed under cnpg* and reached only through
+  // GROUP_QUALIFIED_COLUMN_KEYS, so a foreign CRD gets the generic columns
+  // instead of a Cluster column it can never fill.
+  // Kyverno's working records. Both are keyed by things the reader has to see
+  // to know whether anything is wrong: which policy queued the work and what it
+  // was queued against, and which resource a scan is about.
+  updaterequests: [
+    { key: 'name', label: 'Name' },
+    { key: 'namespace', label: 'Namespace', width: 'w-32' },
+    { key: 'status', label: 'State', width: 'w-28' },
+    { key: 'type', label: 'Type', width: 'w-24' },
+    { key: 'policy', label: 'Policy', width: 'w-52' },
+    { key: 'triggers', label: 'Triggered By', width: 'w-56' },
+    { key: 'age', label: 'Age', width: 'w-24' },
+  ],
+  ephemeralreports: [
+    { key: 'name', label: 'Name' },
+    { key: 'namespace', label: 'Namespace', width: 'w-32' },
+    { key: 'status', label: 'Outcome', width: 'w-28' },
+    { key: 'subject', label: 'About', width: 'w-56' },
+    { key: 'source', label: 'Produced By', width: 'w-36' },
+    { key: 'results', label: 'Results', width: 'w-24' },
+    { key: 'age', label: 'Age', width: 'w-24' },
+  ],
+  clusterephemeralreports: [
+    { key: 'name', label: 'Name' },
+    { key: 'status', label: 'Outcome', width: 'w-28' },
+    { key: 'subject', label: 'About', width: 'w-56' },
+    { key: 'source', label: 'Produced By', width: 'w-36' },
+    { key: 'results', label: 'Results', width: 'w-24' },
+    { key: 'age', label: 'Age', width: 'w-24' },
+  ],
+  cnpgdatabases: [
+    { key: 'name', label: 'Name' },
+    { key: 'namespace', label: 'Namespace', width: 'w-36' },
+    { key: 'status', label: 'Applied', width: 'w-32' },
+    { key: 'cluster', label: 'Cluster', width: 'w-36' },
+    { key: 'target', label: 'Database', width: 'w-40' },
+    { key: 'message', label: 'Message', width: 'w-64' },
+    { key: 'age', label: 'Age', width: 'w-24' },
+  ],
+  cnpgpublications: [
+    { key: 'name', label: 'Name' },
+    { key: 'namespace', label: 'Namespace', width: 'w-36' },
+    { key: 'status', label: 'Applied', width: 'w-32' },
+    { key: 'cluster', label: 'Cluster', width: 'w-36' },
+    { key: 'dbname', label: 'In Database', width: 'w-40' },
+    { key: 'message', label: 'Message', width: 'w-64' },
+    { key: 'age', label: 'Age', width: 'w-24' },
+  ],
+  cnpgsubscriptions: [
+    { key: 'name', label: 'Name' },
+    { key: 'namespace', label: 'Namespace', width: 'w-36' },
+    { key: 'status', label: 'Applied', width: 'w-32' },
+    { key: 'cluster', label: 'Cluster', width: 'w-36' },
+    { key: 'dbname', label: 'In Database', width: 'w-40' },
+    { key: 'message', label: 'Message', width: 'w-64' },
+    { key: 'age', label: 'Age', width: 'w-24' },
+  ],
+  cnpgimagecatalogs: [
+    { key: 'name', label: 'Name' },
+    { key: 'namespace', label: 'Namespace', width: 'w-36' },
+    { key: 'majors', label: 'Major Versions', width: 'w-40' },
+    { key: 'images', label: 'Images', width: 'w-24' },
+    { key: 'age', label: 'Age', width: 'w-24' },
+  ],
+  cnpgclusterimagecatalogs: [
+    { key: 'name', label: 'Name' },
+    { key: 'majors', label: 'Major Versions', width: 'w-40' },
+    { key: 'images', label: 'Images', width: 'w-24' },
+    { key: 'age', label: 'Age', width: 'w-24' },
+  ],
+  barmanobjectstores: [
+    { key: 'name', label: 'Name' },
+    { key: 'namespace', label: 'Namespace', width: 'w-36' },
+    { key: 'status', label: 'Status', width: 'w-40' },
+    // Sized rather than flexible: every sibling table gives its long value a
+    // fixed width, and leaving two columns unsized let Name absorb the row at
+    // 1920px — truncating the destination and pushing Retention off-screen.
+    { key: 'destination', label: 'Destination', width: 'w-64' },
+    { key: 'servers', label: 'Servers', width: 'w-32' },
+    { key: 'retention', label: 'Retention', width: 'w-28' },
+    { key: 'age', label: 'Age', width: 'w-24' },
+  ],
   cnpgbackups: [
     { key: 'name', label: 'Name' },
     { key: 'namespace', label: 'Namespace', width: 'w-36' },
@@ -1509,7 +1626,10 @@ const KNOWN_COLUMNS: Record<string, Column[]> = {
     { key: 'address', label: 'Address', width: 'w-56' },
     { key: 'age', label: 'Age', width: 'w-24' },
   ],
-  subscriptions: [
+  // Keyed under knative*, reached only through GROUP_QUALIFIED_COLUMN_KEYS, so a
+  // third operator's `subscriptions` gets the generic columns instead of Channel
+  // and Subscriber it can never fill.
+  knativesubscriptions: [
     { key: 'name', label: 'Name' },
     { key: 'namespace', label: 'Namespace', width: 'w-36' },
     { key: 'status', label: 'Status', width: 'w-28' },
@@ -1892,6 +2012,18 @@ const GROUP_QUALIFIED_COLUMN_KEYS: Record<string, Record<string, string>> = {
   certificates: { 'networking.internal.knative.dev': 'knativecertificates' },
   restores: { 'velero.io': 'velerorestores' },
   schedules: { 'velero.io': 'veleroschedules' },
+  // CNPG's declarative objects. Knative owns the unqualified `subscriptions`
+  // set, and `databases` / `publications` are shipped by several database
+  // operators — none of which have a CNPG Cluster to point at.
+  databases: { 'postgresql.cnpg.io': 'cnpgdatabases' },
+  publications: { 'postgresql.cnpg.io': 'cnpgpublications' },
+  subscriptions: {
+    'postgresql.cnpg.io': 'cnpgsubscriptions',
+    'messaging.knative.dev': 'knativesubscriptions',
+  },
+  imagecatalogs: { 'postgresql.cnpg.io': 'cnpgimagecatalogs' },
+  clusterimagecatalogs: { 'postgresql.cnpg.io': 'cnpgclusterimagecatalogs' },
+  objectstores: { 'barmancloud.cnpg.io': 'barmanobjectstores' },
 }
 
 // Normalize a kind name to its plural API form used in KNOWN_COLUMNS keys.
@@ -4938,6 +5070,11 @@ export function ResourcesView({
           ) : filteredResources.length === 0 ? (
             <div className="absolute inset-0 flex flex-col items-center justify-center text-theme-text-tertiary">
               <p>No {selectedKind.kind} found</p>
+              {emptyKindNote(selectedKind.kind, selectedKind.group, resources?.length ?? 0) && (
+                <p className="text-xs mt-2 max-w-md text-center text-theme-text-disabled">
+                  {emptyKindNote(selectedKind.kind, selectedKind.group, resources?.length ?? 0)}
+                </p>
+              )}
               {searchTerm && (
                 <button
                   onClick={() => {
@@ -5860,6 +5997,42 @@ function CellContent({ resource, kind, column, group, majorityNodeMinorVersion, 
     case 'clustersecretstores':
       return <ClusterSecretStoreCell resource={resource} column={column} />
     // Velero
+    // The cnpg* keys come from GROUP_QUALIFIED_COLUMN_KEYS; the unqualified
+    // plurals below are reached when the caller had no group to resolve with,
+    // and stay group-guarded so a foreign CRD is not read as CNPG.
+    case 'updaterequests':
+      return <KyvernoUpdateRequestCell resource={resource} column={column} />
+    case 'ephemeralreports':
+    case 'clusterephemeralreports':
+      return <KyvernoEphemeralReportCell resource={resource} column={column} />
+    case 'cnpgdatabases':
+    case 'cnpgpublications':
+    case 'cnpgsubscriptions':
+      return <CNPGDeclarativeCell resource={resource} column={column} />
+    case 'databases':
+    case 'publications':
+      if (isApiGroup(resource.apiVersion, CNPG_GROUP)) {
+        return <CNPGDeclarativeCell resource={resource} column={column} />
+      }
+      return <GenericCell resource={resource} column={column} />
+    case 'cnpgimagecatalogs':
+    case 'cnpgclusterimagecatalogs':
+      return <CNPGImageCatalogCell resource={resource} column={column} />
+    case 'imagecatalogs':
+    case 'clusterimagecatalogs':
+      if (isApiGroup(resource.apiVersion, CNPG_GROUP)) {
+        return <CNPGImageCatalogCell resource={resource} column={column} />
+      }
+      return <GenericCell resource={resource} column={column} />
+    case 'barmanobjectstores':
+      return <CNPGObjectStoreCell resource={resource} column={column} />
+    case 'objectstores':
+      // Group-guarded: another operator could serve an `objectstores` plural,
+      // and it would have no recovery window to report.
+      if (isApiGroup(resource.apiVersion, 'barmancloud.cnpg.io')) {
+        return <CNPGObjectStoreCell resource={resource} column={column} />
+      }
+      return <GenericCell resource={resource} column={column} />
     case 'cnpgbackups':
       return <CNPGBackupCell resource={resource} column={column} />
     case 'backups':
@@ -5948,8 +6121,19 @@ function CellContent({ resource, kind, column, group, majorityNodeMinorVersion, 
       return <ChannelCell resource={resource} column={column} />
     case 'inmemorychannels':
       return <InMemoryChannelCell resource={resource} column={column} />
-    case 'subscriptions':
+    case 'knativesubscriptions':
       return <SubscriptionCell resource={resource} column={column} />
+    case 'subscriptions':
+      // Shared plural, and not only by two: CNPG declares one, Knative declares
+      // one, and a third operator's would be read as Knative's — Channel and
+      // Subscriber blank on every row — unless both are matched positively.
+      if (isApiGroup(resource.apiVersion, CNPG_GROUP)) {
+        return <CNPGDeclarativeCell resource={resource} column={column} />
+      }
+      if (isApiGroup(resource.apiVersion, 'messaging.knative.dev')) {
+        return <SubscriptionCell resource={resource} column={column} />
+      }
+      return <GenericCell resource={resource} column={column} />
     // Knative Flows
     case 'sequences':
       return <SequenceCell resource={resource} column={column} />

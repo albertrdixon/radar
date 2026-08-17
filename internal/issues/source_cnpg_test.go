@@ -543,3 +543,59 @@ func TestCNPGBackupKindIsBackupShapedWhateverTheReason(t *testing.T) {
 		t.Errorf("category = %q, want %q", got, issuesapi.CategoryBackupFailed)
 	}
 }
+
+// `status.applied` is three-valued and only `false` is a failure. Verified
+// against CNPG 1.27: demo-broken reports false with the operator's SQL error,
+// demo-app reports true, and both are briefly absent before first reconcile.
+func TestCNPGDeclarativeNotApplied(t *testing.T) {
+	gvr := schema.GroupVersionResource{Group: "postgresql.cnpg.io", Version: "v1", Resource: "databases"}
+	obj := func(status map[string]any) *unstructured.Unstructured {
+		u := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "postgresql.cnpg.io/v1",
+			"kind":       "Database",
+			"metadata":   map[string]any{"name": "demo-broken", "namespace": "pg"},
+		}}
+		if status != nil {
+			u.Object["status"] = status
+		}
+		return u
+	}
+
+	msg := `while creating database "demo_broken": ERROR: role "nobody-owns-this" does not exist (SQLSTATE 42704)`
+	got := detectCNPGIssues(gvr, "Database", obj(map[string]any{"applied": false, "message": msg}))
+	if len(got) != 1 {
+		t.Fatalf("applied=false produced %d issues, want 1", len(got))
+	}
+	if got[0].Severity != SeverityWarning {
+		t.Errorf("severity = %v, want warning", got[0].Severity)
+	}
+	if !strings.Contains(got[0].Message, "nobody-owns-this") {
+		t.Errorf("message drops the operator's reason: %q", got[0].Message)
+	}
+
+	// Pending is not failure. Reporting it would raise an issue against every
+	// declarative object for the first seconds of its life.
+	if n := len(detectCNPGIssues(gvr, "Database", obj(nil))); n != 0 {
+		t.Errorf("no status produced %d issues, want 0", n)
+	}
+	if n := len(detectCNPGIssues(gvr, "Database", obj(map[string]any{}))); n != 0 {
+		t.Errorf("absent applied produced %d issues, want 0", n)
+	}
+	if n := len(detectCNPGIssues(gvr, "Database", obj(map[string]any{"applied": true}))); n != 0 {
+		t.Errorf("applied=true produced %d issues, want 0", n)
+	}
+
+	// All three kinds, and the message names the one in front of you.
+	for _, kind := range []string{"Database", "Publication", "Subscription"} {
+		out := detectCNPGIssues(gvr, kind, obj(map[string]any{"applied": false}))
+		if len(out) != 1 {
+			t.Fatalf("%s produced %d issues, want 1", kind, len(out))
+		}
+		if !strings.Contains(out[0].Message, kind) {
+			t.Errorf("%s message does not name the kind: %q", kind, out[0].Message)
+		}
+		if !strings.Contains(out[0].Message, "gave no reason") {
+			t.Errorf("%s with no operator message should say so: %q", kind, out[0].Message)
+		}
+	}
+}

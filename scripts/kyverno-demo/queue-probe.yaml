@@ -1,0 +1,87 @@
+# Makes Kyverno produce UpdateRequests on demand.
+#
+# NOT applied by the normal bootstrap, and named outside the NN- sequence so the
+# fixture loop skips it. Run `./scripts/kyverno-demo.sh queue` to apply it and
+# `queue clean` to remove it and everything it made.
+#
+# UpdateRequests cannot be a standing fixture: Kyverno deletes them within
+# seconds of `Completed`, so a demo cluster left alone has none. What survives
+# longest is the generate request, which stays `Pending` while the background
+# controller works through its triggers.
+#
+# The two rules produce the two shapes, which are not variations of each other:
+#   generateExisting  ->  ONE request, spec.resource empty, every trigger in
+#                         spec.ruleContext[], targets in status.generatedResources
+#   mutate.targets    ->  ONE request PER trigger, spec.resource populated,
+#                         no ruleContext at all
+---
+# generateExisting drives the BACKGROUND path, where the requests live. The
+# admission path writes the target inline and leaves nothing behind.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: probe-generate-existing
+spec:
+  background: true
+  validationFailureAction: Audit
+  rules:
+    - name: companion-for-existing
+      match:
+        any:
+          - resources:
+              kinds:
+                - ConfigMap
+              namespaces:
+                - policy-demo
+              selector:
+                matchLabels:
+                  demo: bulk
+      generate:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        name: '{{request.object.metadata.name}}-probe'
+        namespace: '{{request.object.metadata.namespace}}'
+        synchronize: true
+        generateExisting: true
+        data:
+          metadata:
+            labels:
+              generated-by: probe-generate-existing
+          spec:
+            podSelector:
+              matchLabels:
+                probe-of: '{{request.object.metadata.name}}'
+            policyTypes:
+              - Ingress
+---
+# mutate-existing: the other UpdateRequest producer. Targets are resources that
+# already exist, so every match is queued rather than mutated at admission.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: probe-mutate-existing
+spec:
+  background: true
+  mutateExistingOnPolicyUpdate: true
+  rules:
+    - name: label-existing-configmaps
+      match:
+        any:
+          - resources:
+              kinds:
+                - ConfigMap
+              namespaces:
+                - policy-demo
+              selector:
+                matchLabels:
+                  demo: bulk
+      mutate:
+        targets:
+          - apiVersion: v1
+            kind: ConfigMap
+            name: '{{request.object.metadata.name}}'
+            namespace: '{{request.object.metadata.namespace}}'
+        patchStrategicMerge:
+          metadata:
+            labels:
+              probe-mutated: "true"

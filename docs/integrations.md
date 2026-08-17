@@ -817,7 +817,31 @@ The taxonomy is defined twice — TypeScript for the badge, Go for the issue det
 
 ### Backup: in-tree vs the barman-cloud plugin
 
-In-tree `spec.backup.barmanObjectStore` is deprecated as of CNPG 1.26. Clusters migrated to the [barman-cloud plugin](https://github.com/cloudnative-pg/plugin-barman-cloud) keep their config in an `ObjectStore` CR (`barmancloud.cnpg.io/v1`), and CNPG stops populating `status.lastSuccessfulBackup` / `firstRecoverabilityPoint` by design. Radar detects the plugin from `spec.plugins[]`, names the ObjectStore and resolved server key, and says so explicitly — rather than rendering an empty backup section that reads identically to "no backups configured". Reading the ObjectStore's recovery window is not yet implemented.
+In-tree `spec.backup.barmanObjectStore` is deprecated as of CNPG 1.26. Clusters migrated to the [barman-cloud plugin](https://github.com/cloudnative-pg/plugin-barman-cloud) keep their config in an `ObjectStore` CR (`barmancloud.cnpg.io/v1`), and CNPG stops populating `status.lastSuccessfulBackup` / `firstRecoverabilityPoint` by design. Radar detects the plugin from `spec.plugins[]`, names the ObjectStore and resolved server key, and says so explicitly — rather than rendering an empty backup section that reads identically to "no backups configured".
+
+The `ObjectStore` itself is rendered: destination and credential provider (never the credentials), retention, and `status.serverRecoveryWindow` per PostgreSQL server — `firstRecoverabilityPoint`, `lastSuccessfulBackupTime`, `lastFailedBackupTime`. Note the field names differ from the Cluster's (`lastSuccessfulBackupTime`, not `lastSuccessfulBackup`); reading the Cluster's spelling off an ObjectStore silently yields nothing.
+
+Two states carry the weight. A failure newer than the last success means the window has stopped advancing while its oldest point still ages out under retention — shrinking from both ends, so it is called out rather than left to be inferred from two timestamps. An ObjectStore with an empty `serverRecoveryWindow` is reported as holding nothing restorable rather than as healthy: on the plugin path the Cluster publishes no recovery point of its own, so a green badge here would be the only claim on screen and it would be wrong.
+
+`Backup` and `ScheduledBackup` with `spec.method: plugin` name the plugin and link to the ObjectStore they write into, and suppress the in-tree `destinationPath` / `serverName` rows, which are never populated on that path.
+
+### Declarative objects: Database, Publication, Subscription
+
+CNPG can manage PostgreSQL-side objects from Kubernetes. All three report through `status.applied`, and it has **three** values, not two: `true`, `false` with the operator's message, and absent — meaning not reconciled yet. Absent is rendered as pending rather than failed; treating it as failure condemns every object in its first seconds.
+
+The names in these specs are PostgreSQL names, not Kubernetes names: a Publication `demo-app-pub` declares `dbname: demo_app`, and the Database CR that owns `demo_app` is called `demo-app`. Radar resolves them back to the CRs so the reference is a link rather than a dead string, and falls back to plain text when nothing matches. The Database detail runs the lookup in the other direction, listing what publishes from and subscribes into it — a link the API only models one way.
+
+`databaseReclaimPolicy` (and its publication/subscription twins) decides whether deleting the manifest drops the real object. `delete` is called out as destructive; CNPG defaults to `retain`, and defaulting the other way in the UI would warn about data loss that is not going to happen.
+
+A declared object the operator could not apply raises an **Issue** (`CNPGDeclarativeNotApplied`, warning) carrying the operator's own message. This is the one CNPG failure with no other signal: the CR exists, the cluster is healthy, every count is green, and the database simply is not there. Only `applied: false` raises it — an absent `applied` means not yet reconciled, and reporting that would flag every declarative object for the first seconds of its life.
+
+`databases`, `publications` and `subscriptions` are crowded plurals — Knative owns `subscriptions`, and several database operators ship the other two — so the column sets are group-qualified and a foreign CRD gets the generic columns instead of a Cluster column it can never fill.
+
+### Image catalogs
+
+`ImageCatalog` and `ClusterImageCatalog` pin one PostgreSQL image per major version. A Cluster that references one carries **no `spec.imageName` at all**; the resolved image lives in `status.image`, so anything reading spec alone shows a dash where an image is running.
+
+A cluster asking for a major the catalog does not list reports "incomplete or invalid image catalog" and stops — and that is invisible from the cluster side, where the reference looks fine. The catalog page lists the clusters pinned to it and separates out those asking for a version it does not carry.
 
 ### Cluster Audit checks
 
@@ -835,8 +859,18 @@ Deliberately narrow: the absence of a ScheduledBackup does not prove a cluster i
 | Backup | `postgresql.cnpg.io/v1` | — | Yes | — |
 | ScheduledBackup | `postgresql.cnpg.io/v1` | — | Yes | — |
 | Pooler | `postgresql.cnpg.io/v1` | — | Yes | — |
+| ObjectStore | `barmancloud.cnpg.io/v1` | — | Yes | — |
+| Database | `postgresql.cnpg.io/v1` | — | Yes | — |
+| Publication | `postgresql.cnpg.io/v1` | — | Yes | — |
+| Subscription | `postgresql.cnpg.io/v1` | — | Yes | — |
+| ImageCatalog | `postgresql.cnpg.io/v1` | — | Yes | — |
+| ClusterImageCatalog | `postgresql.cnpg.io/v1` | — | Yes | — |
 
-The `clusters` and `backups` plurals collide with Cluster API and Velero respectively. Radar resolves both with positive API-group guards, so a third operator's CRD sharing either plural (KubeBlocks, Redis/Valkey operators) falls through to the generic renderer instead of inheriting a fabricated PostgreSQL status.
+The `clusters` and `backups` plurals collide with Cluster API and Velero respectively, and the declarative types add more: `subscriptions` is also Knative messaging's, while `databases` and `publications` are generic enough that several database operators ship them. Radar resolves all of them with positive API-group guards, so a third operator's CRD sharing any of these plurals (KubeBlocks, Redis/Valkey operators) falls through to the generic renderer instead of inheriting a fabricated PostgreSQL status.
+
+**Limitations**:
+- The image-catalog and backup views describe what the cluster reports. A `ScheduledBackup`'s cron is CloudNativePG's six-field form (seconds first) and is shown verbatim rather than translated, because reading it as a five-field expression would state the wrong time.
+- Verified against clusters of a few hundred resources. Neither the recovery-window table nor the declarative-object lists have been exercised on a fleet with thousands of Postgres clusters.
 
 ---
 
@@ -972,6 +1006,31 @@ Deferred to a future "full Crossplane" pass:
 
 **Resource Browser:** Smart columns show status (colored by worst outcome), failure action, rule counts, and pass/fail/warn/error/skip breakdowns.
 
+### The per-policy resource view
+
+A resource page answers "which policies does this break". The policy page answers the other direction: **which resources does this policy cover, and what happens to them** — served by `/api/policy/policies/{policy}` off a reverse index built when reports are replaced, never per request.
+
+Four things make it harder than a lookup:
+
+- **`results[].policy` is producer-defined.** It is not guaranteed to name a policy object; Trivy and Falco write their own identifiers into the same field. When results under this name came from another engine, the page says so rather than presenting them as this policy's own.
+- **The counts are cluster-true, the list is not.** Totals are taken before the namespace view filter and before RBAC, so the headline states the ground it covers first; what is hidden, and why, is named under the list.
+- **`fail` does not mean the same thing per family.** A mutating policy's `fail` carries "mutation is not applied" — nothing violated anything. On the legacy `kyverno.io` kinds the family is not in the kind at all: one ClusterPolicy carries any mix of validate, mutate and generate rules, so the vocabulary is resolved per rule from the rule block. A generate rule's `pass` reads "generated", not "passing".
+- **What enforcing would do depends on declared operations.** A policy matching CREATE only never rejects a change to something that already exists, so resources currently failing it are grandfathered until recreated. Verified on Kyverno 1.18.2: annotating a ConfigMap that fails a CREATE-only Deny policy is admitted; creating an identical one is rejected.
+
+Passing resources are listed too, behind a disclosure — "all N passing" with no way to see which N is a dead end on the page that raises the question.
+
+Authorization is resolved **per subject scope**, not once per policy, and the resource name follows the scope. A ClusterPolicy has no namespace of its own, so asking the question once against `""` gates the whole view on cluster-scoped permission and withholds findings a namespace-restricted caller is entitled to see. And the two families serve findings from two resources each — `policyreports` / `clusterpolicyreports` and `reports` / `clusterreports` — so authorizing a cluster-scoped finding against the namespaced resource asks about the wrong object, and a grant of `policyreports` cluster-wide does not imply `clusterpolicyreports`. The per-resource view filters by the same families as the per-policy view; anything reading findings without their provenance cannot filter at all.
+
+The per-rule subject list is bounded so an ordinary drawer open stays small, and that bound is liftable: `?limit=` raises it to a server ceiling, and the footer offers it rather than ending at a sentence. A count with no way to reach what it counts is the same dead end in a different place.
+
+**GlobalContextEntry** gets its own view because a policy referencing an entry that never resolves fails at evaluation time with no obvious cause. Kyverno records success as `status.lastRefreshTime` and records failure as *nothing at all* — no message, no condition, no reason. So the page reports "has refreshed" versus "has never refreshed" (with the entry's age turning the second into a diagnosis) and says outright that Kyverno records no reason, rather than inventing one.
+
+The count of queued work also appears **on the policy itself**, above its configuration. The requests have their own page, but the failure worth catching is a backlog rather than one request — upstream reports describe thousands stuck in `Pending`, never cleaned up, taken up again on every reconcile — and nobody watches a page that is empty most of the time. The section is silent when a policy has queued nothing, so it never appears on the majority that only validate.
+
+**UpdateRequest** is where a generation or a mutate-existing that silently stopped is diagnosed: the policy reports Ready, the target never appears, and the only evidence is a request sitting in `Pending`. The two request types share a kind and almost nothing else — a *generate* request leaves `spec.resource` empty and `spec.rule` blank, carrying every trigger in `spec.ruleContext[]`; a *mutate* request is one-per-trigger with `spec.resource` populated and no `ruleContext` at all. Reading the documented field alone renders half of them blank.
+
+**EphemeralReport** holds a background scan's findings for one resource before they are folded into a PolicyReport. Its findings live in `spec`, not `status`; its `spec.owner` is present and blank, so the subject comes from the owner reference (and from the `audit.kyverno.io/resource.*` labels once the subject is gone); and its result timestamps are `{seconds, nanos}` objects rather than RFC 3339 strings. Both kinds are deleted within seconds of finishing, so an empty list is completed work, not an outage — which is what the empty states say.
+
 ### Supported CRDs
 
 | CRD | Group | Topology | Detail View | AI Summary |
@@ -980,8 +1039,18 @@ Deferred to a future "full Crossplane" pass:
 | ClusterPolicy | `kyverno.io/v1` | — | Yes | — |
 | PolicyReport | `wgpolicyk8s.io/v1alpha2` | — | Yes | Yes |
 | ClusterPolicyReport | `wgpolicyk8s.io/v1alpha2` | — | Yes | Yes |
+| UpdateRequest | `kyverno.io/v2` | — | Yes | — |
+| GlobalContextEntry | `kyverno.io/v2` | — | Yes | — |
+| EphemeralReport | `reports.kyverno.io/v1` | — | Yes | — |
+| ClusterEphemeralReport | `reports.kyverno.io/v1` | — | Yes | — |
 
 PolicyReport findings are policy posture, not live operational failure, so they are **not** part of the `/api/issues` stream. They surface per-resource: the PolicyReport detail view (above) and the `resourceContext` policy rollup on a resource fetched via `get_resource`. (The cluster audit — `/api/audit` + MCP `get_cluster_audit` — is radar's own static best-practice scanner and does **not** include PolicyReport results.)
+
+**Limitations**:
+- Queued work (`UpdateRequest`) is only shown for policies that generate or mutate existing resources, and only while it is in flight — Kyverno deletes these seconds after the work completes, so an empty section is the normal resting state rather than evidence that nothing ran.
+- Coverage counts describe the whole cluster; the per-rule subject lists are capped by the server and follow the caller's namespace view filter. The screen states which number it is showing, but the two are not interchangeable.
+- Findings from a report family the caller cannot read are withheld from both lists and counts, and the number withheld is reported. A caller entitled to no family at all is told so rather than shown an empty result.
+- Verified against a cluster with a few hundred policy results. The 200-subject cap and its **Load the rest** control are unproven on a cluster with tens of thousands of findings; the load-test harness cannot synthesize PolicyReports.
 
 ---
 

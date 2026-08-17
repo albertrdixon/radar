@@ -4,6 +4,7 @@ import {
   getCNPGBackupStatus,
   getCNPGBackupCluster,
   getCNPGBackupMethod,
+  getCNPGBackupPlugin,
   getCNPGBackupPhase,
   getCNPGBackupDuration,
   getCNPGBackupName,
@@ -11,6 +12,7 @@ import {
   getCNPGBackupServerName,
   getCNPGBackupError,
   getCNPGBackupTarget,
+  CNPG_BARMAN_OBJECTSTORE_GROUP,
 } from '../resource-utils-cnpg'
 
 interface CNPGBackupRendererProps {
@@ -24,6 +26,7 @@ export function CNPGBackupRenderer({ data, onNavigate }: CNPGBackupRendererProps
   const phase = getCNPGBackupPhase(data)
   const target = getCNPGBackupTarget(data)
   const clusterName = getCNPGBackupCluster(data)
+  const backupPlugin = getCNPGBackupPlugin(data)
 
   // WAL range fields
   const beginWal = data.status?.beginWal
@@ -48,6 +51,24 @@ export function CNPGBackupRenderer({ data, onNavigate }: CNPGBackupRendererProps
         <PropertyList>
           <Property label="Phase" value={phase} />
           <Property label="Method" value={getCNPGBackupMethod(data)} />
+          {/* A plugin-taken backup lands in an ObjectStore rather than in the
+              Cluster's own barmanObjectStore, so naming the plugin is what
+              tells an operator where to go looking. */}
+          {backupPlugin && <Property label="Plugin" value={backupPlugin.name} />}
+          {backupPlugin?.parameters?.barmanObjectName && (
+            <Property
+              label="Object Store"
+              value={
+                <ResourceLink
+                  name={backupPlugin.parameters.barmanObjectName}
+                  kind="objectstores"
+                  group={CNPG_BARMAN_OBJECTSTORE_GROUP}
+                  namespace={data.metadata?.namespace || ''}
+                  onNavigate={onNavigate}
+                />
+              }
+            />
+          )}
           <Property label="Duration" value={getCNPGBackupDuration(data)} />
           <Property label="Backup Name" value={getCNPGBackupName(data)} />
           {data.status?.instanceID?.podName && (
@@ -81,8 +102,16 @@ export function CNPGBackupRenderer({ data, onNavigate }: CNPGBackupRendererProps
             }
             return clusterName
           })()} />
-          <Property label="Destination" value={getCNPGBackupDestinationPath(data)} />
-          <Property label="Server Name" value={getCNPGBackupServerName(data)} />
+          {/* Destination and server name are in-tree barmanObjectStore fields.
+              Under the plugin method they are never populated because both live
+              on the ObjectStore, and rendering them as "-" reads as "not
+              configured" rather than "recorded elsewhere". */}
+          {!backupPlugin && (
+            <>
+              <Property label="Destination" value={getCNPGBackupDestinationPath(data)} />
+              <Property label="Server Name" value={getCNPGBackupServerName(data)} />
+            </>
+          )}
         </PropertyList>
       </Section>
 

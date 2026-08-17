@@ -80,6 +80,8 @@ batches, so it never overflows and always converges.
   Core-group kinds (Pods, Services, ConfigMaps, Secrets) show counts. Wiring
   discovery (via `InitTestDynamicResourceCache`) is the same step CRD kinds such
   as HTTPRoutes need, and is the natural next extension.
-- Above ~25,000 pods in scope the Pods table shows a "too many to show" guard and
-  asks you to narrow the namespace — a real Radar responsiveness limit this
-  harness is well suited to exercise.
+- The Pods and ReplicaSets tables fetch `?include=summary` rows (only the fields
+  the table reads, 5–8x smaller than full objects at realistic pod weight) and
+  guard above 50,000 rows in scope; Events and EndpointSlices still guard at
+  25,000. Both limits are real Radar responsiveness boundaries this harness is
+  well suited to exercise.

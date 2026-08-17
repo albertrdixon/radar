@@ -115,14 +115,47 @@ export function getKyvernoPolicyStatus(resource: any): StatusBadge {
   return { text: 'Unknown', color: healthColors.unknown, level: 'unknown' }
 }
 
+/** The rule blocks whose failure an admission request can be rejected for. */
+function rejectingActions(rule: any): string[] {
+  if (!rule) return []
+  const actions: string[] = []
+  if (rule.validate) actions.push(rule.validate.failureAction)
+  if (Array.isArray(rule.verifyImages)) {
+    for (const v of rule.verifyImages) actions.push(v?.failureAction)
+  }
+  return actions.filter(Boolean)
+}
+
+/**
+ * Whether this policy can REJECT an admission request, as Audit or Enforce.
+ *
+ * Three things make the obvious reading wrong. A rule-level failureAction
+ * OVERRIDES `spec.validationFailureAction` rather than deferring to it, so
+ * consulting the spec field first answers Audit for a policy whose rule
+ * enforces. Image verification carries its own failureAction on
+ * `verifyImages[]` rather than under `validate`, so a signing policy blocks
+ * without either of the fields the name suggests. And the spec field is
+ * defaulted to Audit when absent, so its presence proves nothing.
+ *
+ * Only validate and verifyImages rules can reject at all, so only they inherit
+ * the spec-level action — a mutate or generate rule sitting in the same policy
+ * would otherwise carry Enforce into a policy where nothing enforces.
+ *
+ * Rules can disagree, and one value has to stand for the whole policy. The
+ * question worth answering is whether anything here can reject, so any Enforce
+ * wins; the Rules section is where a mixed policy is read rule by rule.
+ */
 export function getKyvernoPolicyAction(resource: any): string {
-  // Check spec-level validationFailureAction (deprecated but still widely used)
-  const action = resource.spec?.validationFailureAction
-  if (action) return action
-  // Fallback: check first rule's validate.failureAction
+  const specAction = resource.spec?.validationFailureAction
   const rules = resource.spec?.rules || []
-  for (const rule of rules) {
-    if (rule.validate?.failureAction) return rule.validate.failureAction
+  if (rules.length === 0) return specAction || 'Audit'
+  const rejecting = rules.filter((rule: any) => rule?.validate || rule?.verifyImages)
+  // Rules, but none that can reject: the spec-level action governs nothing here.
+  if (rejecting.length === 0) return 'Audit'
+  for (const rule of rejecting) {
+    const overrides = rejectingActions(rule)
+    const effective = overrides.length > 0 ? overrides : [specAction]
+    if (effective.includes('Enforce')) return 'Enforce'
   }
   return 'Audit'
 }
@@ -184,7 +217,10 @@ export function getKyvernoPolicyRuleCountByType(resource: any): {
       validate: statusCount.validate ?? 0,
       mutate: statusCount.mutate ?? 0,
       generate: statusCount.generate ?? 0,
-      verifyImages: statusCount.verifyImages ?? 0,
+      // Kyverno writes this key all-lowercase (`verifyimages`), verified on
+      // 1.18.2. Reading the camelCase spelling alone returns 0 for every
+      // image-verification policy in existence.
+      verifyImages: statusCount.verifyImages ?? statusCount.verifyimages ?? 0,
     }
   }
 

@@ -225,8 +225,28 @@ describe('ResourceRendererDispatch — colliding plurals fall through', () => {
     ['backups', 'kubevirt.io/v1'],
     ['scheduledbackups', 'other.io/v1'],
     ['poolers', 'other.io/v1'],
+    // The CNPG declarative kinds and the barman-cloud store extend the same
+    // list. `databases` and `publications` ship with several database
+    // operators, `objectstores` is a generic plural, and `subscriptions` is
+    // Knative's as well — every one of them was blank until this fall-through
+    // covered it.
+    ['objectstores', 'other.io/v1'],
+    ['databases', 'mysql.oracle.com/v2'],
+    ['publications', 'other.io/v1'],
+    ['subscriptions', 'operators.coreos.com/v1alpha1'],
+    ['imagecatalogs', 'other.io/v1'],
+    ['clusterimagecatalogs', 'other.io/v1'],
+    ['policies', 'operators.coreos.com/v1'],
   ])('renders something for a foreign %s CRD', (kind, apiVersion) => {
     expect(renderCollidingKind(kind, apiVersion).trim()).not.toBe('')
+  })
+
+  // Both owners of `subscriptions` still get their own renderer.
+  it.each([
+    ['messaging.knative.dev/v1', 'Subscriber'],
+    ['postgresql.cnpg.io/v1', 'Applied'],
+  ])('still renders the owning engine for subscriptions/%s', (apiVersion, marker) => {
+    expect(renderCollidingKind('subscriptions', apiVersion)).toContain(marker)
   })
 
   it('does not double-render when a known engine matches', () => {
@@ -262,5 +282,42 @@ describe('colliding plurals — near-match API groups', () => {
     const html = renderCollidingKind(kind, apiVersion)
     expect(html.trim()).not.toBe('')
     expect(html).not.toContain('Cluster Overview')
+  })
+})
+
+describe('shared plurals — the status path collides too', () => {
+  // The renderer and the status badge are two separate switches over the same
+  // plural, and fixing one leaves the other reading a foreign CRD's conditions
+  // as if they were Knative's.
+  it('does not give a foreign subscriptions CRD a Knative status', () => {
+    const s = getResourceStatus('subscriptions', {
+      apiVersion: 'operators.coreos.com/v1alpha1',
+      status: { conditions: [{ type: 'Ready', status: 'False' }], phase: 'AtLatestKnown' },
+    })
+    expect(s?.text).toBe('AtLatestKnown')
+  })
+
+  it('still gives Knative its own status', () => {
+    const s = getResourceStatus('subscriptions', {
+      apiVersion: 'messaging.knative.dev/v1',
+      status: { conditions: [{ type: 'Ready', status: 'True' }] },
+    })
+    expect(s?.text).toBe('Ready')
+  })
+
+  // The legacy namespaced Kyverno kind is served as `policies`, which several
+  // operators also use.
+  it('gives a Kyverno Policy its policy status and a foreign one the generic', () => {
+    const kyverno = getResourceStatus('policies', {
+      apiVersion: 'kyverno.io/v1',
+      spec: { validationFailureAction: 'Audit' },
+      status: { conditions: [{ type: 'Ready', status: 'True', reason: 'Succeeded' }] },
+    })
+    expect(kyverno?.text).toBeTruthy()
+    const foreign = getResourceStatus('policies', {
+      apiVersion: 'operators.coreos.com/v1',
+      status: { phase: 'Installed' },
+    })
+    expect(foreign?.text).toBe('Installed')
   })
 })

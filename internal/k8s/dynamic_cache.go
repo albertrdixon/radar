@@ -282,6 +282,14 @@ var supportedCRDFallbacks = []supportedCRDResource{
 	{Group: "postgresql.cnpg.io", Versions: []string{"v1"}, Resource: "poolers", Kind: "Pooler", Namespaced: true},
 	{Group: "postgresql.cnpg.io", Versions: []string{"v1"}, Resource: "backups", Kind: "Backup", Namespaced: true},
 	{Group: "postgresql.cnpg.io", Versions: []string{"v1"}, Resource: "scheduledbackups", Kind: "ScheduledBackup", Namespaced: true},
+	{Group: "postgresql.cnpg.io", Versions: []string{"v1"}, Resource: "databases", Kind: "Database", Namespaced: true},
+	{Group: "postgresql.cnpg.io", Versions: []string{"v1"}, Resource: "publications", Kind: "Publication", Namespaced: true},
+	{Group: "postgresql.cnpg.io", Versions: []string{"v1"}, Resource: "subscriptions", Kind: "Subscription", Namespaced: true},
+	{Group: "postgresql.cnpg.io", Versions: []string{"v1"}, Resource: "imagecatalogs", Kind: "ImageCatalog", Namespaced: true},
+	{Group: "postgresql.cnpg.io", Versions: []string{"v1"}, Resource: "clusterimagecatalogs", Kind: "ClusterImageCatalog", Namespaced: false},
+	// The barman-cloud plugin ships its own group; the in-tree backup settings it
+	// replaces had no CR at all.
+	{Group: "barmancloud.cnpg.io", Versions: []string{"v1"}, Resource: "objectstores", Kind: "ObjectStore", Namespaced: true},
 	{Group: "cluster.x-k8s.io", Versions: []string{"v1beta2", "v1beta1"}, Resource: "clusters", Kind: "Cluster", Namespaced: true},
 	{Group: "cluster.x-k8s.io", Versions: []string{"v1beta2", "v1beta1"}, Resource: "machinedeployments", Kind: "MachineDeployment", Namespaced: true},
 	{Group: "cluster.x-k8s.io", Versions: []string{"v1beta2", "v1beta1"}, Resource: "machinesets", Kind: "MachineSet", Namespaced: true},
@@ -343,6 +351,12 @@ var supportedCRDFallbacks = []supportedCRDResource{
 	{Group: "kyverno.io", Versions: []string{"v2", "v2beta1"}, Resource: "cleanuppolicies", Kind: "CleanupPolicy", Namespaced: true},
 	{Group: "kyverno.io", Versions: []string{"v2", "v2beta1"}, Resource: "clustercleanuppolicies", Kind: "ClusterCleanupPolicy", Namespaced: false},
 	{Group: "kyverno.io", Versions: []string{"v2", "v2beta1"}, Resource: "policyexceptions", Kind: "PolicyException", Namespaced: true},
+	{Group: "kyverno.io", Versions: []string{"v2"}, Resource: "updaterequests", Kind: "UpdateRequest", Namespaced: true},
+	{Group: "kyverno.io", Versions: []string{"v2", "v2beta1", "v2alpha1"}, Resource: "globalcontextentries", Kind: "GlobalContextEntry", Namespaced: false},
+	// Intermediate reports the controller writes before aggregating into
+	// PolicyReports; they carry their own group.
+	{Group: "reports.kyverno.io", Versions: []string{"v1"}, Resource: "ephemeralreports", Kind: "EphemeralReport", Namespaced: true},
+	{Group: "reports.kyverno.io", Versions: []string{"v1"}, Resource: "clusterephemeralreports", Kind: "ClusterEphemeralReport", Namespaced: false},
 	// Modern policies.kyverno.io CEL family — stabilized at v1 in Kyverno
 	// 1.17/1.18, and the family that survives the 1.20 removal. Discovery
 	// already auto-watches small CRDs, so these entries buy the guarantee plus

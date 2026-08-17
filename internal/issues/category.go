@@ -142,6 +142,9 @@ func Classify(in classifyInput) issuesapi.Category {
 			case "CNPGWALArchivingFailing", "CNPGLastBackupFailed", "CNPGBackupFailed":
 				return issuesapi.CategoryBackupFailed
 			}
+			// A declared object that never reached PostgreSQL is a
+			// reconciliation failure, not a backup one — the operator tried and
+			// the database says no.
 			return issuesapi.CategoryOperatorConditionFail
 		case g == "external-secrets.io":
 			return issuesapi.CategorySecretSyncFailed

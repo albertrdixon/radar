@@ -40,6 +40,8 @@ NS=pg
 # move a cluster into the "unrecognised phase" bucket. Bump deliberately and
 # re-check the badges.
 CNPG_VERSION="${CNPG_VERSION:-1.27.0}"
+CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.16.2}"
+BARMAN_PLUGIN_VERSION="${BARMAN_PLUGIN_VERSION:-v0.14.0}"
 CNPG_MANIFEST="https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.27/releases/cnpg-${CNPG_VERSION}.yaml"
 
 PHASE_UNRECOVERABLE="Cluster is unrecoverable and needs manual intervention"
@@ -77,6 +79,7 @@ bootstrap() {
   if cluster_exists; then
     step "Cluster '${CLUSTER_NAME}' already exists — reusing"
     delete_fixture_backups
+    unpin_unresolvable_catalog
     thaw_operator_quiet
   else
     step "Creating kind cluster '${CLUSTER_NAME}'"
@@ -87,6 +90,7 @@ bootstrap() {
   k cluster-info >/dev/null || fail "kind context not reachable"
 
   install_cnpg
+  install_barman_plugin
   apply_fixtures
   wait_for_clusters
   wait_for_pooler
@@ -127,6 +131,92 @@ install_cnpg() {
 # cluster with no backup configuration fails and stamps
 # LastBackupSucceeded=False on that cluster. That turned the pristine baseline
 # into a "Backup Failed" badge, silently, via a resource attached to it.
+# The barman-cloud CNPG-I plugin — the backup path CNPG is migrating to.
+#
+# Installed rather than faked because the whole point of the fixture is the
+# ObjectStore CR, and its CRD only exists once the plugin is deployed. Needs
+# cert-manager: the plugin talks to the operator over mTLS and its manifest
+# ships Certificate/Issuer resources.
+#
+# Set SKIP_BARMAN_PLUGIN=1 to bootstrap without it — the 09 fixture is then
+# skipped and the in-tree barmanObjectStore clusters still cover everything
+# they covered before.
+install_barman_plugin() {
+  if [ "${SKIP_BARMAN_PLUGIN:-0}" = "1" ]; then
+    note "SKIP_BARMAN_PLUGIN=1 — skipping the barman-cloud plugin"
+    return 0
+  fi
+  if k get deploy -n cnpg-system barman-cloud >/dev/null 2>&1; then
+    step "barman-cloud plugin already installed — reusing"
+    return 0
+  fi
+
+  step "Installing cert-manager ${CERT_MANAGER_VERSION} (barman-cloud plugin prerequisite)"
+  k apply -f "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml" >/dev/null
+  for d in cert-manager cert-manager-webhook cert-manager-cainjector; do
+    k -n cert-manager rollout status "deploy/${d}" --timeout=180s >/dev/null
+  done
+  ok "cert-manager rolled out"
+
+  # A rolled-out webhook is NOT a ready webhook. cert-manager's CA bundle is
+  # injected into its ValidatingWebhookConfiguration asynchronously, and until
+  # that lands every Certificate/Issuer apply fails with
+  #   x509: certificate signed by unknown authority
+  # The plugin manifest contains exactly those kinds, so applying it the moment
+  # the Deployment reports Available loses the race — and only partially: the
+  # CRD and Deployment get created while the certs do not, leaving a plugin that
+  # looks installed and cannot serve. Retry until the API actually accepts it.
+  step "Installing barman-cloud plugin ${BARMAN_PLUGIN_VERSION}"
+  local manifest="https://github.com/cloudnative-pg/plugin-barman-cloud/releases/download/${BARMAN_PLUGIN_VERSION}/manifest.yaml"
+  local applied=0
+  for _ in $(seq 1 30); do
+    if k apply -f "${manifest}" >/dev/null 2>&1; then
+      applied=1
+      break
+    fi
+    sleep 5
+  done
+  [ "${applied}" = "1" ] || fail "barman-cloud plugin manifest never applied — cert-manager webhook did not become ready"
+  k -n cnpg-system rollout status deploy/barman-cloud --timeout=180s >/dev/null
+  k wait --for=condition=Established crd/objectstores.barmancloud.cnpg.io --timeout=60s >/dev/null
+  ok "barman-cloud plugin ready"
+}
+
+# Recovery windows and the Cluster's plugin reference.
+#
+# `status.serverRecoveryWindow` cannot be declared in the fixture YAML, and no
+# real window can be produced on kind — there is no object storage to back up
+# to, and a plugin pointed at an unreachable endpoint reports failures rather
+# than a window. Same rationale as the Velero fixtures: the states worth
+# rendering are written directly.
+#
+# pg-store       one clean server + one failing-since-last-success
+# pg-store-fresh left empty on purpose — "configured but nothing restorable",
+#                the state a plugin-backed Cluster can no longer report itself
+#
+# The plugin reference goes on pg-doomed, NOT on pg-healthy, and that is not
+# arbitrary. `spec.plugins` is applied after the freeze, so the operator never
+# rolls the instance pods with the plugin's sidecar, and every instance manager
+# on that cluster then reports `ContinuousArchiving=False — wal archive plugin
+# is not available`. On pg-healthy that turns the healthy baseline into a second
+# WAL-archiving failure and the fixture's whole claim — four clusters, four
+# different badges — stops being true. pg-doomed is already terminal, and a
+# terminal phase outranks the condition, so its badge does not move.
+wire_object_stores() {
+  k get crd objectstores.barmancloud.cnpg.io >/dev/null 2>&1 || return 0
+
+  step "Wiring ObjectStore recovery windows"
+  patch_status objectstores.barmancloud.cnpg.io pg-store \
+    '{"status":{"serverRecoveryWindow":{"pg-doomed":{"firstRecoverabilityPoint":"2026-07-29T02:00:00Z","lastSuccessfulBackupTime":"2026-08-12T02:00:00Z"},"pg-wal-failing":{"firstRecoverabilityPoint":"2026-07-30T02:00:00Z","lastSuccessfulBackupTime":"2026-08-05T02:00:00Z","lastFailedBackupTime":"2026-08-12T02:00:00Z"}}}}'
+  ok "pg-store → one recoverable server, one failing"
+  note "pg-store-fresh left with no window — configured, nothing restorable"
+
+  step "Pointing pg-doomed at the plugin"
+  k -n pg patch clusters.postgresql.cnpg.io pg-doomed --type=merge \
+    -p '{"spec":{"plugins":[{"name":"barman-cloud.cloudnative-pg.io","isWALArchiver":true,"parameters":{"barmanObjectName":"pg-store"}}]}}' >/dev/null
+  ok "pg-doomed → spec.plugins[barman-cloud]"
+}
+
 apply_fixtures() {
   step "Applying CNPG demo fixtures"
   [ -d "${FIXTURES_DIR}" ] || fail "Fixtures dir not found: ${FIXTURES_DIR}"
@@ -134,6 +224,12 @@ apply_fixtures() {
   while IFS= read -r f; do
     case "$(basename "$f")" in
       07-backups.yaml) note "deferring $(basename "$f") until after the freeze"; continue ;;
+      09-objectstores.yaml)
+        if ! k get crd objectstores.barmancloud.cnpg.io >/dev/null 2>&1; then
+          note "skipping $(basename "$f") — barman-cloud plugin not installed"
+          continue
+        fi
+        ;;
     esac
     note "applying $(basename "$f")"
     k apply -f "$f" >/dev/null
@@ -311,6 +407,47 @@ patch_velero_backup() {
   ok "Velero Backup status set (collision row)"
 }
 
+# Points pg-unrecoverable at a major version its catalog does not carry — the
+# state CNPG reports as "incomplete or invalid image catalog".
+#
+# This cannot be a fixture. A cluster created with an unresolvable catalog never
+# gets an image and never reaches 2/2 Ready, and every other thing this cluster
+# demonstrates depends on it having bootstrapped first. So it runs after the
+# freeze, on a cluster that is already up and already terminal, where nothing
+# will reconcile it back.
+pin_unresolvable_catalog() {
+  step "Pinning pg-unrecoverable to a catalog version that does not exist"
+  # `remove` on an absent path is a 422, so the op is only included when there is
+  # something to remove — `refreeze` runs this a second time on a cluster that is
+  # already pinned.
+  local ops='{"op":"add","path":"/spec/imageCatalogRef","value":{"apiGroup":"postgresql.cnpg.io","kind":"ClusterImageCatalog","name":"postgres-fleet","major":15}}'
+  if [ -n "$(k -n "${NS}" get clusters.postgresql.cnpg.io pg-unrecoverable -o jsonpath='{.spec.imageName}' 2>/dev/null)" ]; then
+    ops='{"op":"remove","path":"/spec/imageName"},'"${ops}"
+  fi
+  k -n "${NS}" patch clusters.postgresql.cnpg.io pg-unrecoverable --type=json -p "[${ops}]" \
+    >/dev/null || fail "could not pin pg-unrecoverable to postgres-fleet"
+  ok "pg-unrecoverable → ClusterImageCatalog/postgres-fleet major 15 (absent)"
+}
+
+# The inverse, for a re-run over an existing cluster. `imageName` and
+# `imageCatalogRef` are mutually exclusive and the CRD enforces it, so
+# re-applying 05-clusters.yaml over a pinned pg-unrecoverable is rejected — the
+# two fields have to be swapped in one patch, not left overlapping.
+unpin_unresolvable_catalog() {
+  [ -n "$(k -n "${NS}" get clusters.postgresql.cnpg.io pg-unrecoverable \
+    -o jsonpath='{.spec.imageCatalogRef.name}' 2>/dev/null)" ] || return 0
+  # Taken from a cluster that still declares one, so the tag has exactly one
+  # source of truth: 05-clusters.yaml.
+  local image
+  image=$(k -n "${NS}" get clusters.postgresql.cnpg.io pg-healthy -o jsonpath='{.spec.imageName}' 2>/dev/null)
+  [ -n "${image}" ] || fail "pg-healthy declares no spec.imageName — cannot unpin pg-unrecoverable"
+  k -n "${NS}" patch clusters.postgresql.cnpg.io pg-unrecoverable --type=json -p \
+    '[{"op":"remove","path":"/spec/imageCatalogRef"},
+      {"op":"add","path":"/spec/imageName","value":"'"${image}"'"}]' \
+    >/dev/null || fail "could not unpin pg-unrecoverable before re-applying fixtures"
+  ok "pg-unrecoverable unpinned so the fixtures re-apply cleanly"
+}
+
 patch_status() {
   local resource="$1" name="$2" patch="$3"
   k -n "${NS}" patch "$resource" "$name" --subresource=status --type=merge -p "$patch" >/dev/null 2>&1 \
@@ -347,10 +484,14 @@ freeze_and_patch() {
     ok "$c → ${PHASE_UNRECOVERABLE}"
   done
 
+  pin_unresolvable_catalog
+
   # Backups are created here, not with the other fixtures — see apply_fixtures.
   step "Creating Backups and setting their phases"
   k apply -f "${FIXTURES_DIR}/07-backups.yaml" >/dev/null
   patch_backup_phases
+
+  wire_object_stores
 
   note "Instance managers keep running, so these clusters stay 2/2 Ready —"
   note "which is the point: a red badge on a row whose counts look fine."
@@ -362,7 +503,17 @@ assert_healthy_baseline() {
     -o jsonpath='{range .status.conditions[?(@.type=="LastBackupSucceeded")]}{.status}{end}' 2>/dev/null || echo "")
   [ "${failed}" != "False" ] \
     || fail "pg-healthy has LastBackupSucceeded=False — reset the demo cluster"
-  ok "pg-healthy baseline has no failed-backup condition"
+
+  # The fixture's headline claim is four clusters with four DIFFERENT badges, and
+  # pg-healthy is the only one holding the healthy one. Anything that gives it an
+  # archiving failure — a plugin reference it cannot run, most easily — collapses
+  # two of the four badges into one without failing anything else.
+  local archiving
+  archiving=$(k -n "${NS}" get cluster.postgresql.cnpg.io pg-healthy \
+    -o jsonpath='{range .status.conditions[?(@.type=="ContinuousArchiving")]}{.status}{end}' 2>/dev/null || echo "")
+  [ "${archiving}" != "False" ] \
+    || fail "pg-healthy reports ContinuousArchiving=False — it is meant to be the only Healthy badge"
+  ok "pg-healthy baseline is clean on both backup conditions"
 }
 
 assert_no_fixture_backups() {
@@ -520,6 +671,10 @@ EOF
 
   Also: Pooler (Scheduled, not Ready) · ScheduledBackup (method: plugin) ·
         3 Backups (completed / walArchivingFailing / an unmapped phase) ·
+        2 ObjectStores (one with a recovery window, one never backed up) ·
+        6 declarative objects (Database / Publication / Subscription, in all
+        three applied states) · 2 image catalogs — pg-doomed takes its image
+        from one, pg-unrecoverable asks one for a version it does not carry ·
         a Velero \`backups\` CR and a KubeBlocks \`clusters\` CRD for the
         shared-plural guards.
 

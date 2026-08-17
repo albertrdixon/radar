@@ -1769,6 +1769,33 @@ func (d *DynamicResourceCache) IsClusterWideSynced(gvr schema.GroupVersionResour
 	return clusterWide && d.IsSynced(gvr)
 }
 
+// IsNamespaceSynced reports whether the cache can answer authoritatively for
+// this GVR *in this namespace*.
+//
+// IsSynced spans every informer for the GVR, so it answers "is some informer
+// synced" — true as soon as any one namespace has been watched. A caller reading
+// a different namespace would pass that gate, start a fresh informer on the
+// first List, and read an empty indexer with no error: an absence the cache
+// never established. This asks the question the read actually depends on — the
+// cluster-wide informer if there is one, otherwise this namespace's.
+//
+// An empty namespace means a cluster-wide read; use IsClusterWideSynced for
+// that, which this defers to.
+func (d *DynamicResourceCache) IsNamespaceSynced(gvr schema.GroupVersionResource, namespace string) bool {
+	if d == nil {
+		return false
+	}
+	if namespace == "" {
+		return d.IsClusterWideSynced(gvr)
+	}
+	// readEntries selects exactly the informers that would serve this read — the
+	// cluster-wide one if it exists, otherwise this namespace's, and nothing when
+	// neither does. entriesSynced then asks each informer directly rather than
+	// reading the bookkeeping flag, which the watch goroutine sets a moment later
+	// and which therefore reports a synced informer as unsynced.
+	return entriesSynced(d.readEntries(gvr, namespace))
+}
+
 // ---------------------------------------------------------------------------
 // Introspection
 // ---------------------------------------------------------------------------

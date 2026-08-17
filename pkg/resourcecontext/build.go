@@ -98,6 +98,24 @@ type PolicyReportAvailability interface {
 	Unavailable() (OmittedReason, bool)
 }
 
+// PolicyReportWithholding is implemented by lookups that filter findings per
+// caller.
+//
+// Unavailable answers for the whole lookup and cannot answer for one resource:
+// a caller authorized on one report family and not the other is serving
+// normally right up until the resource they ask about has its findings in the
+// other one. Dropping those silently leaves an empty policy summary, which
+// reads as a resource that violates nothing — the one conclusion the data does
+// not support.
+//
+// Optional, for the same reason as PolicyReportAvailability: existing
+// implementers keep compiling.
+type PolicyReportWithholding interface {
+	// WithheldFor reports whether any finding for this subject was filtered out
+	// as unreadable by the caller.
+	WithheldFor(group, kind, namespace, name string) bool
+}
+
 type ServiceBackendLookup interface {
 	PodsForServiceSelector(namespace string, selector labels.Selector) ([]*corev1.Pod, error)
 }
@@ -315,6 +333,13 @@ func Build(ctx context.Context, obj runtime.Object, opts Options) *ResourceConte
 			}
 		}
 		findings := opts.PolicyReports.FindingsFor(ident.Group, ident.Kind, ident.Namespace, ident.Name)
+		// Per subject, because a lookup serving normally still withholds the
+		// findings of a family this caller may not read. The tracker dedupes, so
+		// this collapses into the note above when the whole lookup was denied.
+		if w, ok := opts.PolicyReports.(PolicyReportWithholding); ok &&
+			w.WithheldFor(ident.Group, ident.Kind, ident.Namespace, ident.Name) {
+			omitted.add("policySummary.kyverno", OmittedRBACDenied)
+		}
 		if len(findings) > 0 {
 			rc.PolicySummary = buildPolicySummary(findings, opts.Tier)
 		}

@@ -1,5 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
-import type { PolicyResourceResponse } from '@skyhook-io/k8s-ui'
+import type {
+  PolicyResourceResponse,
+  PolicyCoverageResponse,
+  PolicyQueuedResponse,
+  CNPGCatalogUsersResponse,
+} from '@skyhook-io/k8s-ui'
 import { fetchJSON } from './client'
 
 // /api/policy/resource/{kind}/{namespace}/{name}
@@ -18,6 +23,120 @@ export function usePolicyResource(kind: string, namespace: string, name: string,
     staleTime: 15000,
     // A 403 is a settled answer about this identity, not a blip — retrying
     // would just repeat the denial on every drawer open.
+    retry: false,
+  })
+}
+
+// /api/policy/policies/{policy}
+//
+// The inverse lookup: every resource one policy recorded an outcome for. A
+// namespaced Kyverno Policy reports as "namespace/name", so the namespace is
+// passed through and the server tries both shapes.
+/**
+ * Whether a cached coverage result describes the same thing the caller is asking
+ * about now — same policy, namespace and view — so only a changed `limit`
+ * separates them. Exported for tests: the alternative is showing one policy's
+ * findings on another policy's page.
+ */
+export function isSameCoverageSubject(
+  prevKey: readonly unknown[] | undefined,
+  policy: string,
+  namespace: string,
+  viewFilter: string,
+): boolean {
+  if (!prevKey || prevKey.length < 6) return false
+  return prevKey[2] === policy && prevKey[3] === namespace && prevKey[5] === viewFilter
+}
+
+// `limit` raises the per-rule subject bound. It is part of the query key so
+// asking for more is a separate fetch rather than a mutation of the cached one,
+// and the default response stays cached for every other drawer open.
+export function usePolicyCoverage(
+  policy: string,
+  namespace?: string,
+  enabled = true,
+  limit?: number,
+  /**
+   * Whatever identifies the caller's current namespace view. The server applies
+   * that filter from session state, so it changes the response body without
+   * changing the URL — it has to be in the key or the cache serves the previous
+   * scope's answer under the new scope's heading.
+   */
+  viewFilter = '',
+) {
+  return useQuery<PolicyCoverageResponse>({
+    queryKey: ['policy', 'coverage', policy, namespace ?? '', limit ?? 0, viewFilter],
+    queryFn: () => {
+      const params = new URLSearchParams()
+      if (namespace) params.set('namespace', namespace)
+      if (limit) params.set('limit', String(limit))
+      const qs = params.toString()
+      return fetchJSON<PolicyCoverageResponse>(
+        `/policy/policies/${encodeURIComponent(policy)}${qs ? `?${qs}` : ''}`,
+      )
+    },
+    enabled: enabled && !!policy,
+    staleTime: 15000,
+    retry: false,
+    // Raising the limit is a new query key, and without this the section would
+    // fall back to its full loading state — asking to see MORE resources would
+    // briefly remove the ones already on screen.
+    //
+    // Only across a limit change, though. The drawer reuses this observer when
+    // it opens a different policy, so reusing unconditionally renders one
+    // policy's resources and counts under another's name, with no loading state
+    // to suggest they are not its own.
+    placeholderData: (prev, prevQuery) =>
+      isSameCoverageSubject(prevQuery?.queryKey, policy, namespace ?? '', viewFilter)
+        ? prev
+        : undefined,
+  })
+}
+
+// /api/policy/policies/{policy}/queued
+//
+// Kyverno records UpdateRequests in its own namespace whatever namespace the
+// policy lives in, so this cannot be a client-side list: omitting the namespace
+// on the generic resources endpoint means "apply the caller's namespace view
+// filter", and a reader narrowed to their own namespace would be answered for
+// the wrong scope. The server reads cluster-wide, gated on the caller's ability
+// to list the kind — the same shape as the RBAC reverse lookups.
+//
+// No view filter in the key: the answer does not depend on one.
+export function usePolicyQueued(policy: string, namespace = '', enabled = true) {
+  return useQuery<PolicyQueuedResponse>({
+    queryKey: ['policy', 'queued', policy, namespace],
+    queryFn: () =>
+      fetchJSON<PolicyQueuedResponse>(
+        `/policy/policies/${encodeURIComponent(policy)}/queued${
+          namespace ? `?namespace=${encodeURIComponent(namespace)}` : ''
+        }`,
+      ),
+    enabled: enabled && !!policy,
+    // These live for seconds, so a long stale window would describe a queue that
+    // has already drained.
+    staleTime: 5000,
+    retry: false,
+  })
+}
+
+// /api/cnpg/{imagecatalogs/{namespace}|clusterimagecatalogs}/{name}/clusters
+//
+// A ClusterImageCatalog is cluster-scoped and referenceable from any namespace,
+// so the answer's scope is not the subject's. Asking the generic resources
+// endpoint without a namespace inherits the caller's namespace view filter and
+// would report "nothing uses this" on the strength of whichever namespaces they
+// happen to be showing — an all-clear before an edit, derived from a browsing
+// preference. Read server-side, gated on listing Clusters.
+export function useCNPGCatalogUsers(name: string, namespace = '', enabled = true) {
+  const path = namespace
+    ? `/cnpg/imagecatalogs/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/clusters`
+    : `/cnpg/clusterimagecatalogs/${encodeURIComponent(name)}/clusters`
+  return useQuery<CNPGCatalogUsersResponse>({
+    queryKey: ['cnpg', 'catalog-users', namespace, name],
+    queryFn: () => fetchJSON<CNPGCatalogUsersResponse>(path),
+    enabled: enabled && !!name,
+    staleTime: 15000,
     retry: false,
   })
 }

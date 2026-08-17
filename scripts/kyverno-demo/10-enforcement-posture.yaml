@@ -1,0 +1,161 @@
+# Enforcement posture, where the obvious reading of the spec is wrong.
+#
+# `spec.validationFailureAction` is the field everyone reaches for, and on its
+# own it answers the wrong question three different ways: it is defaulted to
+# Audit when absent, it is overridden by any rule that declares its own
+# failureAction, and it does not govern rules that cannot reject in the first
+# place. Each policy below isolates one of those.
+#
+# The subject is created before the policies so that each policy's own
+# reconcile scans it — the background scan interval is an hour, and a fixture
+# that only produces results after an hour produces none during a demo.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: policy-posture
+---
+# Carries `a` and not `b`, which is what makes it fail exactly one rule of
+# `posture-rules-disagree` — the one that only audits.
+#
+# The `posture` label is what every rule below selects on. Without it the rules
+# would also match `kube-root-ca.crt`, which Kubernetes creates in every
+# namespace: the states would stop being the ones described, and an Enforce rule
+# would be standing in front of a ConfigMap the control plane rotates.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: posture-subject
+  namespace: policy-posture
+  labels:
+    posture: "subject"
+    a: "present"
+data:
+  note: "subject for the enforcement-posture policies"
+---
+# Policy-wide Enforce, and nothing here can reject.
+#
+# The validating rule overrides the policy-wide action down to Audit, and the
+# only other rule mutates — mutation failures are not admission rejections, so
+# the policy-wide Enforce governs nothing. Reading the spec field alone reports
+# this policy as blocking; creating a violating ConfigMap in this namespace
+# shows it is not.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: posture-mixed-actions
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: audited-validate
+      match:
+        any:
+          - resources:
+              kinds: [ConfigMap]
+              namespaces: [policy-posture]
+              selector:
+                matchLabels:
+                  posture: "subject"
+      validate:
+        failureAction: Audit
+        message: "every ConfigMap here should name an owner"
+        pattern:
+          metadata:
+            labels:
+              owner: "?*"
+    - name: a-mutation
+      match:
+        any:
+          - resources:
+              kinds: [ConfigMap]
+              namespaces: [policy-posture]
+              selector:
+                matchLabels:
+                  posture: "subject"
+      mutate:
+        patchStrategicMerge:
+          metadata:
+            labels:
+              posture-mutated: "yes"
+---
+# One policy, two rules, two different answers to "does failing this block me".
+#
+# `blocking-rule` rejects on admission; `auditing-rule` only reports. A single
+# consequence sentence cannot describe both, and the failing count does not say
+# which rule a failure came from — `posture-subject` fails only the auditing
+# rule and is in no danger at all.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: posture-rules-disagree
+spec:
+  background: true
+  rules:
+    - name: blocking-rule
+      match:
+        any:
+          - resources:
+              kinds: [ConfigMap]
+              namespaces: [policy-posture]
+              selector:
+                matchLabels:
+                  posture: "subject"
+      validate:
+        failureAction: Enforce
+        message: "label 'a' is required, and this rule rejects without it"
+        pattern:
+          metadata:
+            labels:
+              a: "?*"
+    - name: auditing-rule
+      match:
+        any:
+          - resources:
+              kinds: [ConfigMap]
+              namespaces: [policy-posture]
+              selector:
+                matchLabels:
+                  posture: "subject"
+      validate:
+        failureAction: Audit
+        message: "label 'b' is expected, but this rule only reports"
+        pattern:
+          metadata:
+            labels:
+              b: "?*"
+---
+# A rule that never reaches a verdict.
+#
+# The context entry names a ConfigMap that does not exist, so evaluation fails
+# before the pattern is ever considered and Kyverno records `error` rather than
+# pass or fail. Nothing is being checked and nothing is being blocked, which is
+# the state most easily mistaken for compliance.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: posture-unresolvable-context
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: needs-missing-configmap
+      match:
+        any:
+          - resources:
+              kinds: [ConfigMap]
+              namespaces: [policy-posture]
+              selector:
+                matchLabels:
+                  posture: "subject"
+      context:
+        - name: missing
+          configMap:
+            name: does-not-exist
+            namespace: policy-posture
+      validate:
+        message: "owner should come from {{ missing.data.owner }}"
+        pattern:
+          metadata:
+            labels:
+              owner: "{{ missing.data.owner }}"

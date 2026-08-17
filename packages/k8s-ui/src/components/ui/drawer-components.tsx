@@ -167,7 +167,10 @@ export function Property({ label, value, copyable, onCopy, copied }: PropertyPro
   return (
     <div className="flex items-start gap-2 text-sm">
       <span className="text-theme-text-tertiary w-40 shrink-0">{label}</span>
-      <span className={clsx('text-theme-text-primary flex-1 min-w-0', isReactElement(value) ? 'break-normal' : 'break-all')}>{displayValue}</span>
+      {/* break-words, not break-all: a long unbroken token (image ref, UID)
+          still wraps because it has to, while a sentence keeps its words
+          intact. break-all split "PostgreSQL" across two lines. */}
+      <span className={clsx('text-theme-text-primary flex-1 min-w-0', isReactElement(value) ? 'break-normal' : 'break-words')}>{displayValue}</span>
       {copyable && onCopy && !isReactElement(value) && (
         <button
           onClick={() => onCopy(strValue, labelKey)}
@@ -870,7 +873,7 @@ interface RelationshipGroupProps {
 
 const RELATIONSHIP_TRUNCATE_LIMIT = 10
 
-function RelationshipGroup({ label, refs, onNavigate }: RelationshipGroupProps) {
+export function RelationshipGroup({ label, refs, onNavigate }: RelationshipGroupProps) {
   const [showAll, setShowAll] = useState(false)
   if (!refs || refs.length === 0) return null
 

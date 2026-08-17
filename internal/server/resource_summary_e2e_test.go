@@ -169,6 +169,37 @@ func TestListResourcesIncludeSummaryE2E(t *testing.T) {
 	}
 }
 
+// Typed-path wiring: the smoke fixture pod carries container images; a
+// summary list must shed them while the raw list keeps them, and the
+// informer-cache object must stay intact (the row builders share slices with
+// it but never mutate).
+func TestListPodsIncludeSummaryE2E(t *testing.T) {
+	var summarized []map[string]any
+	assertOK(t, get(t, "/api/resources/pods?include=summary"), &summarized)
+	if len(summarized) == 0 {
+		t.Fatal("no pods in summary response")
+	}
+	containers := mustNested(t, summarized[0], "spec", "containers").([]any)
+	c0, _ := containers[0].(map[string]any)
+	if c0["image"] != nil {
+		t.Errorf("summary pod kept containers[0].image: %v", c0["image"])
+	}
+	if c0["name"] == nil {
+		t.Error("summary pod lost containers[0].name — container squares read it")
+	}
+	if mustNested(t, summarized[0], "metadata", "name") == "" {
+		t.Error("summary pod lost metadata.name")
+	}
+
+	var full []map[string]any
+	assertOK(t, get(t, "/api/resources/pods"), &full)
+	fullContainers := mustNested(t, full[0], "spec", "containers").([]any)
+	fc0, _ := fullContainers[0].(map[string]any)
+	if fc0["image"] == nil {
+		t.Error("raw pod response lost containers[0].image — summary leaked into the raw path or mutated the cache")
+	}
+}
+
 func TestListResourcesUnknownIncludeRejected(t *testing.T) {
 	setupArgoApplicationsDynamicCache(t)
 

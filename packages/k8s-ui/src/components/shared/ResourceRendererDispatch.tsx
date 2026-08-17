@@ -52,6 +52,7 @@ import { getNodePoolStatus, getNodeClaimStatus, getEC2NodeClassStatus } from '..
 import { getScaledObjectStatus, getScaledJobStatus } from '../resources/resource-utils-keda'
 import { getServiceMonitorStatus, getPrometheusRuleStatus, getPodMonitorStatus } from '../resources/resource-utils-prometheus'
 import { getPolicyReportStatus, getKyvernoPolicyStatus } from '../resources/resource-utils-kyverno'
+import { getKyvernoRequestState, getKyvernoReportStatus } from '../resources/resource-utils-kyverno-queue'
 import {
   KYVERNO_MODERN_PLURALS,
   getModernKyvernoPolicyStatus,
@@ -73,7 +74,7 @@ import {
   getPeerAuthenticationStatus,
   getAuthorizationPolicyStatus,
 } from '../resources/resource-utils-istio'
-import { getCNPGClusterStatus, getCNPGBackupStatus, getCNPGScheduledBackupStatus, getCNPGPoolerStatus, isApiGroup, CNPG_GROUP } from '../resources/resource-utils-cnpg'
+import { getCNPGClusterStatus, getCNPGBackupStatus, getCNPGScheduledBackupStatus, getCNPGPoolerStatus, getCNPGObjectStoreStatus, getCNPGDeclarativeStatus, isApiGroup, CNPG_GROUP } from '../resources/resource-utils-cnpg'
 import { getExternalSecretStatus, getClusterExternalSecretStatus, getSecretStoreStatus, getClusterSecretStoreStatus } from '../resources/resource-utils-eso'
 import {
   getKnativeConditionStatus,
@@ -157,6 +158,15 @@ import {
   KyvernoMutatingPolicyRenderer,
   KyvernoGeneratingPolicyRenderer,
   KyvernoDeletingPolicyRenderer,
+  CNPGObjectStoreRenderer,
+  CNPGDatabaseRenderer,
+  CNPGPublicationRenderer,
+  CNPGSubscriptionRenderer,
+  CNPGImageCatalogRenderer,
+  KyvernoGlobalContextRenderer,
+  KyvernoUpdateRequestRenderer,
+  KyvernoEphemeralReportRenderer,
+  getKyvernoGlobalContextStatus,
   KyvernoPolicyExceptionRenderer,
   KyvernoCleanupPolicyRenderer,
   VeleroBackupRenderer,
@@ -297,6 +307,37 @@ export interface RendererOverrides {
     onNavigate?: (ref: ResourceRef) => void
     composedRefStatuses?: Map<string, ComposedRefStatus>
   }>
+  // CNPG Publication / Subscription: the host resolves the PostgreSQL-side
+  // names in their spec back to the CRs that declare them. Database and
+  // ImageCatalog get the reverse lookup, which the API only models one way.
+  CNPGImageCatalogRenderer?: React.ComponentType<{ data: any; onNavigate?: (ref: ResourceRef) => void }>
+  CNPGDatabaseRenderer?: React.ComponentType<{ data: any; onNavigate?: (ref: ResourceRef) => void }>
+  CNPGPublicationRenderer?: React.ComponentType<{ data: any; onNavigate?: (ref: ResourceRef) => void }>
+  CNPGSubscriptionRenderer?: React.ComponentType<{ data: any; onNavigate?: (ref: ResourceRef) => void }>
+  // CNPG Cluster: the host wraps it to add the reverse lookup of declarative
+  // objects, which needs three list fetches.
+  CNPGClusterRenderer?: React.ComponentType<{
+    data: any
+    onNavigate?: (ref: ResourceRef) => void
+  }>
+  // CNPG ObjectStore: the host wraps the package renderer to add the reverse
+  // lookup (which Clusters back up here), which needs a Cluster list fetch.
+  CNPGObjectStoreRenderer?: React.ComponentType<{
+    data: any
+    onNavigate?: (ref: ResourceRef) => void
+  }>
+  // Kyverno policy coverage: the host fetches /api/policy/policies/... and
+  // renders the section, which the policy renderers accept as a slot. One
+  // override serves all six policy renderers — they differ in what the policy
+  // declares, not in what its results look like.
+  KyvernoPolicyCoverage?: React.ComponentType<{
+    data: any
+    onNavigate?: (ref: ResourceRef) => void
+  }>
+  // Work a generate / mutate-existing policy has queued and not finished. The
+  // requests have their own page; the count belongs here because the failure
+  // this catches is a backlog, and nobody watches a page that is usually empty.
+  KyvernoPolicyQueued?: React.ComponentType<{ data: any }>
   // ServiceAccount reverse-lookup: the host fetches /api/rbac/subject/... and
   // feeds the result into the base renderer via this wrapper.
   ServiceAccountRenderer?: React.ComponentType<{
@@ -364,6 +405,10 @@ const KNOWN_KINDS = new Set([
   'triggerauthentications', 'clustertriggerauthentications',
   'servicemonitors', 'prometheusrules', 'podmonitors',
   'policyreports', 'clusterpolicyreports', 'kyvernopolicies', 'clusterpolicies',
+  // The API serves the legacy namespaced kind as `policies`. `kyvernopolicies`
+  // is Radar's internal alias for it and is NOT a servable plural, so a URL
+  // built from it 400s — the drawer has to know the real one.
+  'policies',
   // Kyverno modern CEL family (policies.kyverno.io) + its namespaced twins.
   'validatingpolicies', 'namespacedvalidatingpolicies',
   'imagevalidatingpolicies', 'namespacedimagevalidatingpolicies',
@@ -380,7 +425,9 @@ const KNOWN_KINDS = new Set([
   'verticalpodautoscalers',
   'backups', 'restores', 'schedules', 'backupstoragelocations', 'volumesnapshotlocations',
   'externalsecrets', 'clusterexternalsecrets', 'secretstores', 'clustersecretstores',
-  'clusters', 'scheduledbackups', 'poolers',
+  'clusters', 'scheduledbackups', 'poolers', 'objectstores',
+  'globalcontextentries', 'updaterequests', 'ephemeralreports', 'clusterephemeralreports',
+  'databases', 'publications', 'imagecatalogs', 'clusterimagecatalogs',
   'virtualservices', 'destinationrules', 'serviceentries',
   'peerauthentications', 'authorizationpolicies',
   'mutatingwebhookconfigurations', 'validatingwebhookconfigurations',
@@ -559,13 +606,29 @@ export function ResourceRendererDispatch({
   // and friends in the wild) and `backups` (CNPG / Velero). Both render lines
   // are positively apiVersion-gated, so a third CRD with the plural matches
   // neither and needs an explicit fall-through or the drawer renders blank.
+  //
+  // The CNPG declarative kinds and the barman-cloud ObjectStore extend the same
+  // list: `databases`, `publications` and `subscriptions` are shipped by several
+  // database operators, `objectstores` is a generic enough plural for any of
+  // them, and `subscriptions` is Knative's as well. Adding a kind to KNOWN_KINDS
+  // with a positively-gated render line and forgetting this list is what makes a
+  // foreign CRD render a BLANK drawer rather than the generic one.
   const isGroupGatedKind =
     kind === 'clusters' || kind === 'backups' || kind === 'scheduledbackups' || kind === 'poolers'
+    || kind === 'objectstores' || kind === 'databases' || kind === 'publications'
+    || kind === 'subscriptions' || kind === 'imagecatalogs' || kind === 'clusterimagecatalogs'
+    || kind === 'policies'
   const isCNPGApiVersion = isApiGroup(data?.apiVersion, CNPG_GROUP)
   const groupGatedMatched =
     (kind === 'clusters' && (isCNPGApiVersion || isApiGroup(data?.apiVersion, 'cluster.x-k8s.io')))
     || (kind === 'backups' && (isCNPGApiVersion || isApiGroup(data?.apiVersion, 'velero.io')))
     || ((kind === 'scheduledbackups' || kind === 'poolers') && isCNPGApiVersion)
+    || (kind === 'objectstores' && isApiGroup(data?.apiVersion, 'barmancloud.cnpg.io'))
+    || ((kind === 'databases' || kind === 'publications' || kind === 'imagecatalogs'
+      || kind === 'clusterimagecatalogs') && isCNPGApiVersion)
+    || (kind === 'subscriptions'
+      && (isCNPGApiVersion || isApiGroup(data?.apiVersion, 'messaging.knative.dev')))
+    || (kind === 'policies' && isApiGroup(data?.apiVersion, 'kyverno.io'))
   const groupGatedFallthrough = isGroupGatedKind && !groupGatedMatched
 
   const isKnownKind = KNOWN_KINDS.has(kind) || isCrossplaneMR || isCrossplaneClaim || isCrossplaneXR
@@ -576,6 +639,18 @@ export function ResourceRendererDispatch({
   const NodeComp = rendererOverrides?.NodeRenderer ?? NodeRenderer
   const ServiceComp = rendererOverrides?.ServiceRenderer ?? ServiceRenderer
   const CompositeComp = rendererOverrides?.CompositeRenderer ?? CompositeRenderer
+  const CNPGClusterComp = rendererOverrides?.CNPGClusterRenderer ?? CNPGClusterRenderer
+  const CNPGImageCatalogComp = rendererOverrides?.CNPGImageCatalogRenderer ?? CNPGImageCatalogRenderer
+  const CNPGDatabaseComp = rendererOverrides?.CNPGDatabaseRenderer ?? CNPGDatabaseRenderer
+  const CNPGPublicationComp = rendererOverrides?.CNPGPublicationRenderer ?? CNPGPublicationRenderer
+  const CNPGSubscriptionComp = rendererOverrides?.CNPGSubscriptionRenderer ?? CNPGSubscriptionRenderer
+  const CNPGObjectStoreComp = rendererOverrides?.CNPGObjectStoreRenderer ?? CNPGObjectStoreRenderer
+  const KyvernoCoverageComp = rendererOverrides?.KyvernoPolicyCoverage
+  const kyvernoCoverage = KyvernoCoverageComp ? (
+    <KyvernoCoverageComp data={data} onNavigate={onNavigate} />
+  ) : undefined
+  const KyvernoQueuedComp = rendererOverrides?.KyvernoPolicyQueued
+  const kyvernoQueued = KyvernoQueuedComp ? <KyvernoQueuedComp data={data} /> : undefined
   const ServiceAccountComp = rendererOverrides?.ServiceAccountRenderer ?? ServiceAccountRenderer
   const RoleComp = rendererOverrides?.RoleRenderer ?? RoleRenderer
   const RoleBindingComp = rendererOverrides?.RoleBindingRenderer ?? RoleBindingRenderer
@@ -674,15 +749,20 @@ export function ResourceRendererDispatch({
         {kind === 'prometheusrules' && <PrometheusRuleRenderer data={data} />}
         {kind === 'podmonitors' && <PodMonitorRenderer data={data} />}
         {(kind === 'policyreports' || kind === 'clusterpolicyreports') && <PolicyReportRenderer data={data} />}
-        {(kind === 'kyvernopolicies' || (kind === 'clusterpolicies' && !data?.apiVersion?.startsWith('nvidia.com/'))) && <KyvernoPolicyRenderer data={data} />}
+        {(kind === 'kyvernopolicies'
+          || (kind === 'policies' && isApiGroup(data?.apiVersion, 'kyverno.io'))
+          || (kind === 'clusterpolicies' && !data?.apiVersion?.startsWith('nvidia.com/'))) && <KyvernoPolicyRenderer data={data} coverage={kyvernoCoverage} queued={kyvernoQueued} />}
         {(kind === 'clusterpolicies' && data?.apiVersion?.startsWith('nvidia.com/')) && <NvidiaClusterPolicyRenderer data={data} />}
         {/* Kyverno modern CEL family. Each Namespaced* twin shares its
             cluster-scoped counterpart's renderer — same spec, narrower scope. */}
-        {kyvernoModernMatched && (kind === 'validatingpolicies' || kind === 'namespacedvalidatingpolicies') && <KyvernoValidatingPolicyRenderer data={data} />}
-        {kyvernoModernMatched && (kind === 'imagevalidatingpolicies' || kind === 'namespacedimagevalidatingpolicies') && <KyvernoImageValidatingPolicyRenderer data={data} />}
-        {kyvernoModernMatched && (kind === 'mutatingpolicies' || kind === 'namespacedmutatingpolicies') && <KyvernoMutatingPolicyRenderer data={data} />}
-        {kyvernoModernMatched && (kind === 'generatingpolicies' || kind === 'namespacedgeneratingpolicies') && <KyvernoGeneratingPolicyRenderer data={data} />}
-        {kyvernoModernMatched && (kind === 'deletingpolicies' || kind === 'namespaceddeletingpolicies') && <KyvernoDeletingPolicyRenderer data={data} />}
+        {kyvernoModernMatched && (kind === 'validatingpolicies' || kind === 'namespacedvalidatingpolicies') && <KyvernoValidatingPolicyRenderer data={data} coverage={kyvernoCoverage} />}
+        {kyvernoModernMatched && (kind === 'imagevalidatingpolicies' || kind === 'namespacedimagevalidatingpolicies') && <KyvernoImageValidatingPolicyRenderer data={data} coverage={kyvernoCoverage} />}
+        {kyvernoModernMatched && (kind === 'mutatingpolicies' || kind === 'namespacedmutatingpolicies') && <KyvernoMutatingPolicyRenderer data={data} coverage={kyvernoCoverage} />}
+        {kyvernoModernMatched && (kind === 'generatingpolicies' || kind === 'namespacedgeneratingpolicies') && <KyvernoGeneratingPolicyRenderer data={data} coverage={kyvernoCoverage} />}
+        {kyvernoModernMatched && (kind === 'deletingpolicies' || kind === 'namespaceddeletingpolicies') && <KyvernoDeletingPolicyRenderer data={data} coverage={kyvernoCoverage} />}
+        {kind === 'globalcontextentries' && <KyvernoGlobalContextRenderer data={data} onNavigate={onNavigate} />}
+        {kind === 'updaterequests' && <KyvernoUpdateRequestRenderer data={data} onNavigate={onNavigate} />}
+        {(kind === 'ephemeralreports' || kind === 'clusterephemeralreports') && <KyvernoEphemeralReportRenderer data={data} onNavigate={onNavigate} />}
         {policyExceptionMatched && <KyvernoPolicyExceptionRenderer data={data} />}
         {kyvernoLegacyExtraMatched && <KyvernoCleanupPolicyRenderer data={data} />}
         {kind === 'nvidiadrivers' && <NvidiaDriverRenderer data={data} />}
@@ -691,6 +771,11 @@ export function ResourceRendererDispatch({
         {kind === 'resourceclaimtemplates' && <ResourceClaimTemplateRenderer data={data} />}
         {kind === 'deviceclasses' && <DeviceClassRenderer data={data} />}
         {kind === 'resourceslices' && <ResourceSliceRenderer data={data} onNavigate={onNavigate} />}
+        {kind === 'objectstores' && isApiGroup(data.apiVersion, 'barmancloud.cnpg.io') && <CNPGObjectStoreComp data={data} onNavigate={onNavigate} />}
+        {kind === 'databases' && isApiGroup(data.apiVersion, CNPG_GROUP) && <CNPGDatabaseComp data={data} onNavigate={onNavigate} />}
+        {kind === 'publications' && isApiGroup(data.apiVersion, CNPG_GROUP) && <CNPGPublicationComp data={data} onNavigate={onNavigate} />}
+        {kind === 'subscriptions' && isApiGroup(data.apiVersion, CNPG_GROUP) && <CNPGSubscriptionComp data={data} onNavigate={onNavigate} />}
+        {(kind === 'imagecatalogs' || kind === 'clusterimagecatalogs') && isApiGroup(data.apiVersion, CNPG_GROUP) && <CNPGImageCatalogComp data={data} onNavigate={onNavigate} />}
         {kind === 'backups' && isApiGroup(data.apiVersion, CNPG_GROUP) && <CNPGBackupRenderer data={data} onNavigate={onNavigate} />}
         {kind === 'backups' && isApiGroup(data.apiVersion, 'velero.io') && <VeleroBackupRenderer data={data} />}
         {kind === 'restores' && isVeleroResource(data) && <VeleroRestoreRenderer data={data} />}
@@ -700,7 +785,7 @@ export function ResourceRendererDispatch({
         {kind === 'externalsecrets' && <ExternalSecretRenderer data={data} onNavigate={onNavigate} />}
         {kind === 'clusterexternalsecrets' && <ClusterExternalSecretRenderer data={data} onNavigate={onNavigate} />}
         {(kind === 'secretstores' || kind === 'clustersecretstores') && <SecretStoreRenderer data={data} />}
-        {kind === 'clusters' && isApiGroup(data?.apiVersion, CNPG_GROUP) && <CNPGClusterRenderer data={data} onNavigate={onNavigate} />}
+        {kind === 'clusters' && isApiGroup(data?.apiVersion, CNPG_GROUP) && <CNPGClusterComp data={data} onNavigate={onNavigate} />}
         {kind === 'clusters' && isApiGroup(data?.apiVersion, 'cluster.x-k8s.io') && <CAPIClusterRenderer data={data} onNavigate={onNavigate} />}
         {kind === 'scheduledbackups' && isApiGroup(data?.apiVersion, CNPG_GROUP) && <CNPGScheduledBackupRenderer data={data} onNavigate={onNavigate} />}
         {kind === 'poolers' && isApiGroup(data?.apiVersion, CNPG_GROUP) && <CNPGPoolerRenderer data={data} onNavigate={onNavigate} />}
@@ -767,7 +852,9 @@ export function ResourceRendererDispatch({
         {kind === 'eventtypes' && <EventTypeRenderer data={data} />}
         {kind === 'channels' && <ChannelRenderer data={data} onNavigate={onNavigate} />}
         {kind === 'inmemorychannels' && <InMemoryChannelRenderer data={data} onNavigate={onNavigate} />}
-        {kind === 'subscriptions' && <SubscriptionRenderer data={data} onNavigate={onNavigate} />}
+        {/* Group-guarded: CNPG serves a `subscriptions` plural too, and without
+            this an unrelated PostgreSQL Subscription rendered Knative's sections. */}
+        {kind === 'subscriptions' && isApiGroup(data.apiVersion, 'messaging.knative.dev') && <SubscriptionRenderer data={data} onNavigate={onNavigate} />}
         {kind === 'sequences' && <SequenceRenderer data={data} onNavigate={onNavigate} />}
         {kind === 'parallels' && <ParallelRenderer data={data} onNavigate={onNavigate} />}
 
@@ -921,7 +1008,8 @@ export function getResourceStatus(kind: string, data: any): { text: string; colo
   if (k === 'clustercompliancereports') return getClusterComplianceReportStatus(data)
   if (k === 'sbomreports' || k === 'clustersbomreports') return getSbomReportStatus(data)
   if (k === 'policyreports' || k === 'clusterpolicyreports') return getPolicyReportStatus(data)
-  if (k === 'kyvernopolicies' || k === 'clusterpolicies') {
+  if (k === 'kyvernopolicies' || k === 'clusterpolicies'
+    || (k === 'policies' && isApiGroup(data.apiVersion, 'kyverno.io'))) {
     if (data?.apiVersion?.startsWith('nvidia.com/')) return getNvidiaClusterPolicyStatus(data)
     return getKyvernoPolicyStatus(data)
   }
@@ -945,6 +1033,19 @@ export function getResourceStatus(kind: string, data: any): { text: string; colo
     if (isApiGroup(data.apiVersion, CNPG_GROUP)) return getCNPGBackupStatus(data)
     if (isApiGroup(data.apiVersion, 'velero.io')) return getBackupStatus(data)
   }
+  // Group-guarded: `objectstores` is a generic plural another operator could
+  // claim, and a foreign CR must not borrow CNPG's recovery-window semantics.
+  if (k === 'objectstores' && isApiGroup(data.apiVersion, 'barmancloud.cnpg.io')) {
+    return getCNPGObjectStoreStatus(data)
+  }
+  // Group-guarded for the same reason as the renderers: these plurals are
+  // generic enough that another operator can serve them.
+  if ((k === 'databases' || k === 'publications' || k === 'subscriptions') && isApiGroup(data.apiVersion, CNPG_GROUP)) {
+    return getCNPGDeclarativeStatus(data)
+  }
+  if (k === 'globalcontextentries') return getKyvernoGlobalContextStatus(data)
+  if (k === 'updaterequests') return getKyvernoRequestState(data)
+  if (k === 'ephemeralreports' || k === 'clusterephemeralreports') return getKyvernoReportStatus(data)
   if (k === 'restores' && isVeleroResource(data)) return getRestoreStatus(data)
   if (k === 'schedules' && isVeleroResource(data)) return getScheduleStatus(data)
   if (k === 'backupstoragelocations' && isVeleroResource(data)) return getBSLStatus(data)
@@ -1018,11 +1119,20 @@ export function getResourceStatus(kind: string, data: any): { text: string; colo
     'knativeservices', 'knativeconfigurations', 'knativeroutes',
     'brokers', 'triggers',
     'pingsources', 'apiserversources', 'containersources', 'sinkbindings',
-    'channels', 'inmemorychannels', 'subscriptions',
+    'channels', 'inmemorychannels',
     'sequences', 'parallels',
     'domainmappings', 'knativeingresses', 'knativecertificates', 'serverlessservices',
   ]
-  if (knativeConditionKinds.includes(k) || (k === 'ingresses' && data.apiVersion?.includes('networking.internal.knative.dev'))) {
+  // `subscriptions` is shared with CNPG (handled above) and with any number of
+  // other operators, so it is matched by group rather than by name — reading a
+  // foreign CRD's conditions as Knative's is the status half of the same
+  // collision the renderers guard.
+  const isKnativeSubscription = k === 'subscriptions' && isApiGroup(data.apiVersion, 'messaging.knative.dev')
+  if (
+    knativeConditionKinds.includes(k)
+    || isKnativeSubscription
+    || (k === 'ingresses' && data.apiVersion?.includes('networking.internal.knative.dev'))
+  ) {
     const status = getKnativeConditionStatus(data)
     return { text: status.text, color: status.color }
   }

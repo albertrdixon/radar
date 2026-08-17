@@ -1,0 +1,41 @@
+# The image catalogs, applied BEFORE the clusters.
+#
+# The ordering is load-bearing: pg-doomed takes its image from postgres-pinned
+# rather than from a literal tag, and a cluster whose catalog does not exist yet
+# never resolves an image and never bootstraps. Numbered 04 so `sort` puts it
+# ahead of 05-clusters.yaml.
+#
+# postgres-pinned's major 17 entry deliberately matches the tag every other
+# cluster runs, so pinning changes where the image comes from and not which
+# image it is — the fixture proves the reference, not an upgrade.
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ImageCatalog
+metadata:
+  name: postgres-pinned
+  namespace: pg
+spec:
+  images:
+    - major: 16
+      image: ghcr.io/cloudnative-pg/postgresql:16.4
+    - major: 17
+      image: ghcr.io/cloudnative-pg/postgresql:17.5
+---
+# Cluster-scoped, and referenced from a namespace — the other half of the
+# lookup, which is unscoped and would pass a namespace-only implementation
+# unnoticed.
+#
+# It carries no major 15, which is what pg-unrecoverable asks for once the
+# script patches it after the freeze. That mismatch cannot be declared here:
+# the cluster has to reach 2/2 Ready first, and a cluster pinned to a missing
+# major never starts at all.
+apiVersion: postgresql.cnpg.io/v1
+kind: ClusterImageCatalog
+metadata:
+  name: postgres-fleet
+spec:
+  images:
+    - major: 16
+      image: ghcr.io/cloudnative-pg/postgresql:16.4
+    - major: 17
+      image: ghcr.io/cloudnative-pg/postgresql:17.0

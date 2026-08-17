@@ -1,0 +1,90 @@
+# A legacy generate rule, and GlobalContextEntry — external data a policy reads
+# while it evaluates.
+#
+# What this actually produces, verified on Kyverno 1.18.2: creating a matching
+# ConfigMap generates the NetworkPolicy through admission, and **no
+# UpdateRequest is left behind**. `skipBackgroundRequests: true` keeps the
+# generation on the admission path, where Kyverno writes the target directly.
+# UpdateRequests come from the background path, which needs the background
+# controller up long enough to process them — so this fixture is not the one
+# that will get you an UpdateRequest to look at.
+#
+# The generate rule is still worth having: its report result is `pass`, and the
+# family that makes `pass` mean "generated" rather than "compliant" lives in the
+# rule block, not in the kind.
+---
+# Every matching ConfigMap gets a companion NetworkPolicy, named after it.
+#
+# NetworkPolicy rather than Secret on purpose: Kyverno's background controller
+# ships with RBAC for the former and not the latter, and its own admission
+# webhook rejects the policy outright rather than failing later. Granting the
+# controller blanket Secret access to make a demo fixture work would be a
+# security change disguised as a fixture.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: legacy-generate-companion
+spec:
+  # Deliberately not Enforce: this policy generates, it does not block.
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: companion-secret
+      match:
+        any:
+          - resources:
+              kinds:
+                - ConfigMap
+              namespaces:
+                - policy-demo
+              selector:
+                matchLabels:
+                  needs-companion: "true"
+      generate:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        name: "{{request.object.metadata.name}}-companion"
+        namespace: "{{request.object.metadata.namespace}}"
+        synchronize: true
+        data:
+          metadata:
+            labels:
+              generated-by: legacy-generate-companion
+          spec:
+            podSelector:
+              matchLabels:
+                companion-of: "{{request.object.metadata.name}}"
+            policyTypes:
+              - Ingress
+---
+# The ConfigMap that triggers the rule above is NOT here. It is created by the
+# script, after the policy reports Ready.
+#
+# Applying both in one manifest looks correct and silently does nothing: the
+# ConfigMap is admitted milliseconds after the policy, before Kyverno has
+# rebuilt its webhook to intercept ConfigMaps for it. The rule declares
+# `skipBackgroundRequests: true`, so nothing re-examines the trigger afterwards
+# — the ConfigMap sits there, labelled and matching, with no NetworkPolicy and
+# no error anywhere. See `trigger_generate_rule` in scripts/kyverno-demo.sh.
+---
+# A GlobalContextEntry backed by an in-cluster API call. Policies referencing it
+# fail when it cannot resolve, and the entry is where that is diagnosed.
+apiVersion: kyverno.io/v2
+kind: GlobalContextEntry
+metadata:
+  name: cluster-namespaces
+spec:
+  apiCall:
+    urlPath: "/api/v1/namespaces"
+    refreshInterval: 10m
+---
+# Points at a path that does not exist, so the entry reports its own failure
+# rather than looking identical to a working one.
+apiVersion: kyverno.io/v2
+kind: GlobalContextEntry
+metadata:
+  name: broken-lookup
+spec:
+  apiCall:
+    urlPath: "/apis/does.not.exist/v1/things"
+    refreshInterval: 10m

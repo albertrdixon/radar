@@ -24,6 +24,14 @@ import {
   getCNPGPoolerType,
   getCNPGPoolerMode,
   getCNPGPoolerInstances,
+  getCNPGObjectStoreStatus,
+  getCNPGObjectStoreDestination,
+  getCNPGObjectStoreRetention,
+  getCNPGObjectStoreRecoveryWindows,
+  getCNPGDeclarativeStatus,
+  getCNPGDeclarativeCluster,
+  getCNPGDeclarativeMessage,
+  getCNPGImageCatalogEntries,
 } from '../resource-utils-cnpg'
 
 /** Terminal = the operator has stopped reconciling; neighbouring cells are stale. */
@@ -116,6 +124,98 @@ export function CNPGBackupCell({ resource, column }: { resource: any; column: st
     case 'duration': {
       const duration = getCNPGBackupDuration(resource)
       return <span className="text-sm text-theme-text-secondary">{duration}</span>
+    }
+    default:
+      return <span className="text-sm text-theme-text-tertiary">-</span>
+  }
+}
+
+export function CNPGDeclarativeCell({ resource, column }: { resource: any; column: string }) {
+  switch (column) {
+    case 'status': {
+      const status = getCNPGDeclarativeStatus(resource)
+      return <span className={clsx('badge', status.color)}>{status.text}</span>
+    }
+    case 'cluster':
+      return (
+        <span className="text-sm text-theme-text-secondary truncate block">
+          {getCNPGDeclarativeCluster(resource) || '-'}
+        </span>
+      )
+    case 'target':
+      return (
+        <span className="text-sm text-theme-text-secondary truncate block">
+          {resource?.spec?.name || '-'}
+        </span>
+      )
+    case 'dbname':
+      return (
+        <span className="text-sm text-theme-text-secondary truncate block">
+          {resource?.spec?.dbname || resource?.spec?.owner || '-'}
+        </span>
+      )
+    case 'message':
+      return (
+        <span
+          className="text-sm text-theme-text-secondary truncate block"
+          title={getCNPGDeclarativeMessage(resource) || ''}
+        >
+          {getCNPGDeclarativeMessage(resource) || '-'}
+        </span>
+      )
+    default:
+      return <span className="text-sm text-theme-text-tertiary">-</span>
+  }
+}
+
+export function CNPGImageCatalogCell({ resource, column }: { resource: any; column: string }) {
+  const entries = getCNPGImageCatalogEntries(resource)
+  switch (column) {
+    case 'majors':
+      return (
+        <span className="text-sm text-theme-text-secondary">
+          {entries.length === 0 ? 'none' : entries.map((e) => e.major).join(', ')}
+        </span>
+      )
+    case 'images':
+      return <span className="text-sm text-theme-text-secondary">{String(entries.length)}</span>
+    default:
+      return <span className="text-sm text-theme-text-tertiary">-</span>
+  }
+}
+
+export function CNPGObjectStoreCell({ resource, column }: { resource: any; column: string }) {
+  switch (column) {
+    case 'status': {
+      const status = getCNPGObjectStoreStatus(resource)
+      return <span className={clsx('badge', status.color)}>{status.text}</span>
+    }
+    case 'destination':
+      // `block` is load-bearing: an inline span with `truncate` establishes no
+      // box, so the column collapses to almost nothing regardless of its width.
+      // Every sibling cell that renders a long value pairs the two.
+      return (
+        <span className="text-sm text-theme-text-secondary truncate block">
+          {getCNPGObjectStoreDestination(resource)}
+        </span>
+      )
+    case 'retention':
+      return (
+        <span className="text-sm text-theme-text-secondary">
+          {getCNPGObjectStoreRetention(resource) || '-'}
+        </span>
+      )
+    case 'servers': {
+      const windows = getCNPGObjectStoreRecoveryWindows(resource)
+      if (windows.length === 0) {
+        return <span className="text-sm text-theme-text-tertiary">none</span>
+      }
+      const failing = windows.filter((w) => w.failingSinceLastSuccess).length
+      return (
+        <span className="text-sm text-theme-text-secondary">
+          {failing > 0 ? `${windows.length} (${failing} failing)` : String(windows.length)}
+        </span>
+      )
     }
     default:
       return <span className="text-sm text-theme-text-tertiary">-</span>

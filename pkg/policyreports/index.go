@@ -48,14 +48,46 @@ const MaxIndexedReports = 500
 //
 // The index is a pure projection of the input reports — it owns no
 // underlying state and does not refetch.
+
+// sourcedFinding is a Finding plus the report API groups it arrived in.
+//
+// Provenance is kept BESIDE the finding rather than inside it on purpose.
+// Finding is the dedup key in dedupeFindings, which exists to collapse the same
+// result arriving in both report families while a cluster migrates from
+// wgpolicyk8s.io to openreports.io. A group field inside Finding would change
+// that key, silently stop the collapse, and double-count every violation on
+// exactly the mid-migration clusters the dedup was written for.
+type sourcedFinding struct {
+	Finding Finding
+	// Groups are the report API groups this identical finding was seen in,
+	// sorted and deduped. More than one means both families carry it.
+	Groups []string
+}
+
 type Index struct {
 	mu        sync.RWMutex
-	bySubject map[string][]Finding
+	bySubject map[string][]sourcedFinding
+	byPolicy  map[string][]PolicyOutcome
 }
 
 // NewIndex returns an empty Index.
 func NewIndex() *Index {
-	return &Index{bySubject: make(map[string][]Finding)}
+	return &Index{
+		bySubject: make(map[string][]sourcedFinding),
+		byPolicy:  make(map[string][]PolicyOutcome),
+	}
+}
+
+// PolicyOutcome pairs a subject with one finding a policy recorded against it.
+// It is the reverse of the bySubject projection: "which resources did this
+// policy examine, and what did it decide about each".
+type PolicyOutcome struct {
+	Subject Subject
+	Finding Finding
+	// Groups are the report API groups this outcome was read from. A caller
+	// authorizing per family filters on these; an outcome seen in both families
+	// carries both, so a caller who can read either may see it.
+	Groups []string
 }
 
 // BuildIndex constructs an Index from a slice of PolicyReport documents
@@ -82,15 +114,94 @@ func (i *Index) Replace(reports []*unstructured.Unstructured) {
 		return
 	}
 
-	next := make(map[string][]Finding)
+	next := make(map[string][]sourcedFinding)
 	for _, r := range reports {
 		extractFindings(r, next)
 	}
 	dedupeFindings(next)
+	nextByPolicy := buildPolicyIndex(next)
 
 	i.mu.Lock()
 	i.bySubject = next
+	i.byPolicy = nextByPolicy
 	i.mu.Unlock()
+}
+
+// buildPolicyIndex inverts the per-subject map into a per-policy one.
+//
+// Built here rather than projected per request: the caller reads this on every
+// policy drawer open and on every SSE-driven refresh, and walking the whole
+// subject map each time would copy every finding in the cluster to answer a
+// question about one policy.
+func buildPolicyIndex(bySubject map[string][]sourcedFinding) map[string][]PolicyOutcome {
+	byPolicy := make(map[string][]PolicyOutcome)
+	for key, findings := range bySubject {
+		group, kind, ns, name, ok := parseSubjectKey(key)
+		if !ok {
+			continue
+		}
+		subject := Subject{Group: group, Kind: kind, Namespace: ns, Name: name}
+		for _, sf := range findings {
+			if sf.Finding.Policy == "" {
+				continue
+			}
+			byPolicy[sf.Finding.Policy] = append(byPolicy[sf.Finding.Policy],
+				PolicyOutcome{Subject: subject, Finding: sf.Finding, Groups: sf.Groups})
+		}
+	}
+	for policy, outcomes := range byPolicy {
+		slices.SortFunc(outcomes, func(left, right PolicyOutcome) int {
+			return cmp.Or(
+				cmp.Compare(left.Subject.Namespace, right.Subject.Namespace),
+				cmp.Compare(left.Subject.Kind, right.Subject.Kind),
+				cmp.Compare(left.Subject.Name, right.Subject.Name),
+				cmp.Compare(left.Finding.Rule, right.Finding.Rule),
+				cmp.Compare(left.Finding.Result, right.Finding.Result),
+			)
+		})
+		byPolicy[policy] = outcomes
+	}
+	return byPolicy
+}
+
+// OutcomesForPolicy returns every subject this policy recorded a finding
+// against, in stable order. `policy` must match the report's `results[].policy`
+// value verbatim — Kyverno writes a bare name for cluster-scoped policies and
+// `namespace/name` for namespaced ones, so callers holding a policy object
+// should try both shapes.
+//
+// The returned slice is a defensive copy.
+func (i *Index) OutcomesForPolicy(policy string) []PolicyOutcome {
+	if i == nil || policy == "" {
+		return nil
+	}
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	src := i.byPolicy[policy]
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]PolicyOutcome, len(src))
+	copy(out, src)
+	return out
+}
+
+// autogenPrefixes are the rule-name prefixes Kyverno synthesises when it
+// expands a Pod rule to the controllers that own Pods. The generated rules are
+// not written by the user and must not be presented as if they were.
+var autogenPrefixes = []string{"autogen-cronjob-", "autogen-"}
+
+// BaseRule strips Kyverno's autogen prefix from a rule name, reporting whether
+// one was present. `autogen-validate-image-tag` and `validate-image-tag` are
+// the same authored rule applied at two levels; showing both as peers doubles
+// the rule list and invites the question of which one is real.
+func BaseRule(rule string) (base string, autogen bool) {
+	for _, p := range autogenPrefixes {
+		if strings.HasPrefix(rule, p) {
+			return strings.TrimPrefix(rule, p), true
+		}
+	}
+	return rule, false
 }
 
 // dedupeFindings collapses byte-identical findings within each subject.
@@ -103,33 +214,48 @@ func (i *Index) Replace(reports []*unstructured.Unstructured) {
 // and counting it twice would inflate every violation total.
 // Sorting by the complete finding value keeps downstream top-N summaries
 // stable even though informer stores do not promise report iteration order.
-func dedupeFindings(bySubject map[string][]Finding) {
+func dedupeFindings(bySubject map[string][]sourcedFinding) {
 	for key, findings := range bySubject {
 		if len(findings) < 2 {
 			continue
 		}
-		seen := make(map[Finding]bool, len(findings))
+		// Keyed on Finding exactly as before — the collapse must not weaken.
+		// The groups of every duplicate are unioned onto the survivor so
+		// provenance is preserved without entering the key.
+		at := make(map[Finding]int, len(findings))
 		out := findings[:0]
-		for _, f := range findings {
-			if seen[f] {
+		for _, sf := range findings {
+			if idx, ok := at[sf.Finding]; ok {
+				out[idx].Groups = mergeGroups(out[idx].Groups, sf.Groups)
 				continue
 			}
-			seen[f] = true
-			out = append(out, f)
+			at[sf.Finding] = len(out)
+			out = append(out, sf)
 		}
-		slices.SortFunc(out, func(left, right Finding) int {
+		slices.SortFunc(out, func(left, right sourcedFinding) int {
 			return cmp.Or(
-				cmp.Compare(left.Policy, right.Policy),
-				cmp.Compare(left.Rule, right.Rule),
-				cmp.Compare(left.Result, right.Result),
-				cmp.Compare(left.Severity, right.Severity),
-				cmp.Compare(left.Category, right.Category),
-				cmp.Compare(left.Message, right.Message),
-				cmp.Compare(left.Source, right.Source),
+				cmp.Compare(left.Finding.Policy, right.Finding.Policy),
+				cmp.Compare(left.Finding.Rule, right.Finding.Rule),
+				cmp.Compare(left.Finding.Result, right.Finding.Result),
+				cmp.Compare(left.Finding.Severity, right.Finding.Severity),
+				cmp.Compare(left.Finding.Category, right.Finding.Category),
+				cmp.Compare(left.Finding.Message, right.Finding.Message),
+				cmp.Compare(left.Finding.Source, right.Finding.Source),
 			)
 		})
 		bySubject[key] = out
 	}
+}
+
+// mergeGroups unions two sorted-unique group lists.
+func mergeGroups(a, b []string) []string {
+	for _, g := range b {
+		if !slices.Contains(a, g) {
+			a = append(a, g)
+		}
+	}
+	slices.Sort(a)
+	return a
 }
 
 // FindingsFor returns the findings indexed for the given subject. Returns
@@ -151,8 +277,66 @@ func (i *Index) FindingsFor(group, kind, namespace, name string) []Finding {
 	if len(src) == 0 {
 		return nil
 	}
-	out := make([]Finding, len(src))
-	copy(out, src)
+	out := make([]Finding, 0, len(src))
+	for _, sf := range src {
+		out = append(out, sf.Finding)
+	}
+	return out
+}
+
+// SourcedFindingsFor returns the findings for a subject with the report
+// families each came from.
+//
+// The plain FindingsFor drops that provenance, and a caller who drops it cannot
+// filter on it — which is how the per-resource view came to show a caller
+// findings from a family they are not authorized to read while the per-policy
+// view filtered them out. Same index, same subject, two different answers.
+func (i *Index) SourcedFindingsFor(group, kind, namespace, name string) []PolicyOutcome {
+	if i == nil {
+		return nil
+	}
+	key := subjectKey(group, kind, namespace, name)
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	src := i.bySubject[key]
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]PolicyOutcome, 0, len(src))
+	for _, sf := range src {
+		out = append(out, PolicyOutcome{
+			Subject: Subject{Group: group, Kind: kind, Namespace: namespace, Name: name},
+			Finding: sf.Finding,
+			Groups:  append([]string(nil), sf.Groups...),
+		})
+	}
+	return out
+}
+
+// SourcedFindingsForAnyEngine is FindingsForAnyEngine with the provenance kept.
+//
+// A caller that both labels its result with an engine name AND authorizes per
+// report family needs the two filters together: engine alone over-counts once a
+// second producer is installed, family alone attributes another engine's
+// findings to Kyverno. The agent-facing surfaces need exactly that pair.
+func (i *Index) SourcedFindingsForAnyEngine(group, kind, namespace, name string, engines ...Engine) []PolicyOutcome {
+	if len(engines) == 0 {
+		return nil
+	}
+	all := i.SourcedFindingsFor(group, kind, namespace, name)
+	if len(all) == 0 {
+		return nil
+	}
+	want := make(map[Engine]bool, len(engines))
+	for _, e := range engines {
+		want[e] = true
+	}
+	out := make([]PolicyOutcome, 0, len(all))
+	for _, o := range all {
+		if want[o.Finding.Engine()] {
+			out = append(out, o)
+		}
+	}
 	return out
 }
 
@@ -235,8 +419,10 @@ func (i *Index) All() []SubjectFindings {
 		if !ok {
 			continue
 		}
-		fs := make([]Finding, len(src))
-		copy(fs, src)
+		fs := make([]Finding, 0, len(src))
+		for _, sf := range src {
+			fs = append(fs, sf.Finding)
+		}
 		out = append(out, SubjectFindings{
 			Subject:  Subject{Group: group, Kind: kind, Namespace: ns, Name: name},
 			Findings: fs,
@@ -306,12 +492,14 @@ func (i *Index) Size() int {
 //	    resources:
 //	      - apiVersion, kind, namespace, name, uid     # optional, can be []
 //	    ...
-func extractFindings(report *unstructured.Unstructured, dst map[string][]Finding) {
+func extractFindings(report *unstructured.Unstructured, dst map[string][]sourcedFinding) {
 	if report == nil {
 		return
 	}
 
 	scopeGroup, scopeKind, scopeNS, scopeName := reportScope(report)
+	// The report's OWN group — which family it came from — not the subject's.
+	reportGroup := groupFromAPIVersion(report.GetAPIVersion())
 
 	rawResults, found, err := unstructured.NestedFieldNoCopy(report.Object, "results")
 	if err != nil || !found {
@@ -366,7 +554,7 @@ func extractFindings(report *unstructured.Unstructured, dst map[string][]Finding
 					ns = reportNamespace
 				}
 				key := subjectKey(scopeGroup, scopeKind, ns, scopeName)
-				dst[key] = append(dst[key], f)
+				dst[key] = append(dst[key], sourcedFinding{Finding: f, Groups: []string{reportGroup}})
 			}
 			continue
 		}
@@ -380,7 +568,7 @@ func extractFindings(report *unstructured.Unstructured, dst map[string][]Finding
 				ns = reportNamespace
 			}
 			key := subjectKey(s.group, s.kind, ns, s.name)
-			dst[key] = append(dst[key], f)
+			dst[key] = append(dst[key], sourcedFinding{Finding: f, Groups: []string{reportGroup}})
 		}
 	}
 }

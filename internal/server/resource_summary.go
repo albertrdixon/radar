@@ -15,8 +15,11 @@ import (
 // large fleets but that list consumers (the fleet GitOps board) never read.
 // Each profile deletes only those subtrees; every field the board normalizers
 // read must survive intact — resource_summary_test.go pins that contract.
-// Kinds without a profile pass through unchanged, so summary is best-effort
-// and the response stays a bare array of full-shaped objects.
+// Typed kinds get their summary from the keep-list row builders in
+// resource_summary_typed.go instead — same caller contract (same wire shape,
+// only lighter), different mechanism. Kinds with neither pass through
+// unchanged, so summary is best-effort and the response stays a bare array
+// of K8s-wire-shaped objects.
 // Profiles are DATA over pkg/prune's shared mechanism — the keep-list
 // policy lives here (validated by the contract tests below/in *_test.go);
 // the tree surgery, deep-copy discipline, and tail-trim semantics live in
@@ -39,9 +42,10 @@ var summaryStripProfiles = map[string]prune.Profile{
 	},
 }
 
-// Profiles must target CRD kinds (group contains a dot): the summary strip
-// only runs on the dynamic (unstructured) list path — a typed-kind profile
-// would be accepted and silently never apply. Fail loudly at init instead.
+// Profiles must target CRD kinds (group contains a dot): the profile strip
+// only runs on the dynamic (unstructured) list path, so a typed-kind profile
+// would be accepted and silently never apply — typed kinds belong in
+// summarizeTypedList instead. Fail loudly at init.
 func init() {
 	for key := range summaryStripProfiles {
 		if !strings.Contains(key, ".") {

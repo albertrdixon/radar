@@ -746,3 +746,109 @@ func ResetPolicyReportIndex() {
 	// corrupting the new one.
 	policyReportInit = new(sync.Once)
 }
+
+// PolicyReportFamily is one report family Radar indexes, with the resource name
+// a finding is read from at each scope.
+type PolicyReportFamily struct {
+	Group         string
+	Namespaced    string
+	ClusterScoped string
+}
+
+// PolicyReportFamilies are the two families Radar indexes. They share no
+// resource names, and a cluster may serve either or both — Kyverno 1.15+ writes
+// to openreports.io — so authorizing against one name asks about a resource that
+// may not exist here. The namespaced/cluster-scoped split matters for the same
+// reason: a grant of `policyreports` cluster-wide does not imply
+// `clusterpolicyreports`.
+var PolicyReportFamilies = []PolicyReportFamily{
+	{Group: "wgpolicyk8s.io", Namespaced: "policyreports", ClusterScoped: "clusterpolicyreports"},
+	{Group: "openreports.io", Namespaced: "reports", ClusterScoped: "clusterreports"},
+}
+
+// ResourceAt picks the resource a finding about this namespace would have been
+// read from. An empty namespace means a cluster-scoped subject, whose findings
+// live in the cluster-scoped report kind.
+func (f PolicyReportFamily) ResourceAt(namespace string) string {
+	if namespace == "" {
+		return f.ClusterScoped
+	}
+	return f.Namespaced
+}
+
+// ReadablePolicyReportFamilies reports which families an identity may read at
+// the scope implied by namespace. Empty means none, which is a denial.
+//
+// Lives here for the same reason OmittedReason does: the REST handlers, the AI
+// resource context and the MCP tools must all answer identically about who may
+// see what, and the per-resource view already drifted from the per-policy one
+// once. `canList` is the caller's own authorization primitive — Server.canRead
+// over a request, canReadInNamespace over an MCP context.
+func ReadablePolicyReportFamilies(namespace string, canList func(group, resource, namespace string) bool) map[string]bool {
+	out := map[string]bool{}
+	for _, f := range PolicyReportFamilies {
+		if canList(f.Group, f.ResourceAt(namespace), namespace) {
+			out[f.Group] = true
+		}
+	}
+	return out
+}
+
+// PolicyOutcomeReadable reports whether a caller may see an outcome, based on
+// the report families it was read from.
+//
+// An outcome seen in both families carries both, so a caller who may read
+// either keeps it. No provenance at all is a denial rather than a pass: the
+// index could not say where it came from, and guessing in the permissive
+// direction hands over exactly what the family check exists to withhold.
+func PolicyOutcomeReadable(o policyreports.PolicyOutcome, readable map[string]bool) bool {
+	if len(o.Groups) == 0 {
+		return false
+	}
+	for _, g := range o.Groups {
+		if readable[g] {
+			return true
+		}
+	}
+	return false
+}
+
+// ReadableKyvernoFindings returns the Kyverno-attributable findings for a
+// subject that this caller is authorized to see.
+//
+// Both filters at once, because either alone is wrong for an agent-facing
+// rollup: the engine filter keeps another producer's findings out of a total
+// labelled "kyverno", and the family filter keeps back what this identity may
+// not read. The REST resource context and the MCP tools share it so the two
+// cannot answer differently about the same resource.
+func ReadableKyvernoFindings(idx *policyreports.Index, families map[string]bool, group, kind, namespace, name string) []policyreports.Finding {
+	if idx == nil {
+		return nil
+	}
+	outcomes := idx.SourcedFindingsForAnyEngine(group, kind, namespace, name, policyreports.EnginesAttributableToKyverno...)
+	out := make([]policyreports.Finding, 0, len(outcomes))
+	for _, o := range outcomes {
+		if PolicyOutcomeReadable(o, families) {
+			out = append(out, o.Finding)
+		}
+	}
+	return out
+}
+
+// PolicyFindingsWithheld reports whether any finding for this subject was
+// filtered out as unreadable by the caller.
+//
+// The distinction the plain finding list cannot make: no findings because the
+// resource is clean, versus no findings because the ones it has live in a
+// family this identity may not read. Both render as silence otherwise.
+func PolicyFindingsWithheld(idx *policyreports.Index, families map[string]bool, group, kind, namespace, name string) bool {
+	if idx == nil {
+		return false
+	}
+	for _, o := range idx.SourcedFindingsForAnyEngine(group, kind, namespace, name, policyreports.EnginesAttributableToKyverno...) {
+		if !PolicyOutcomeReadable(o, families) {
+			return true
+		}
+	}
+	return false
+}

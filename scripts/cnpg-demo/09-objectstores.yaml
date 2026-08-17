@@ -1,0 +1,75 @@
+# Barman Cloud plugin fixtures — the backup path CNPG is migrating to.
+#
+# In-tree `spec.backup.barmanObjectStore` is deprecated (removal moved to 1.31).
+# Its replacement is a CNPG-I plugin: the destination, retention and recovery
+# window move OFF the Cluster and onto an ObjectStore CR in a different API
+# group, and the Cluster references it through `spec.plugins`.
+#
+# Two ObjectStores, because the states that matter are the ones the Cluster can
+# no longer answer for itself:
+#
+#   pg-store         has a recovery window  -> the plugin path's happy case
+#   pg-store-fresh   has none yet           -> "configured but nothing restorable"
+#
+# The second is the one worth having. A plugin-backed Cluster publishes no
+# recovery-point fields of its own, so an ObjectStore with an empty status is
+# indistinguishable from a working one unless the UI says which it is.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pg-backup-creds
+  namespace: pg
+type: Opaque
+stringData:
+  # Never reached — no object storage runs on kind. The plugin validates the
+  # reference exists before it will accept the ObjectStore.
+  ACCESS_KEY_ID: demo-access-key
+  ACCESS_SECRET_KEY: demo-secret-key
+---
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: pg-store
+  namespace: pg
+spec:
+  retentionPolicy: 30d
+  configuration:
+    destinationPath: s3://radar-demo-backups/pg
+    endpointURL: http://minio.storage.svc:9000
+    s3Credentials:
+      accessKeyId:
+        name: pg-backup-creds
+        key: ACCESS_KEY_ID
+      secretAccessKey:
+        name: pg-backup-creds
+        key: ACCESS_SECRET_KEY
+    wal:
+      compression: gzip
+      maxParallel: 4
+    data:
+      compression: gzip
+      immediateCheckpoint: true
+      jobs: 2
+---
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: pg-store-fresh
+  namespace: pg
+spec:
+  retentionPolicy: 7d
+  configuration:
+    destinationPath: s3://radar-demo-backups/pg-fresh
+    endpointURL: http://minio.storage.svc:9000
+    s3Credentials:
+      accessKeyId:
+        name: pg-backup-creds
+        key: ACCESS_KEY_ID
+      secretAccessKey:
+        name: pg-backup-creds
+        key: ACCESS_SECRET_KEY
+    wal:
+      compression: snappy
+    data:
+      compression: snappy

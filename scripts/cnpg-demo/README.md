@@ -120,8 +120,8 @@ counts, which is the class of bug this fixture exists to catch.
 |---|---|---|
 | `pg/pg-healthy` | `Healthy` | Baseline. Also one of the three clusters `cnpgNoDeclarativeBackup` reports — it has no backup configuration at all. |
 | `pg/pg-wal-failing` | `WAL Archiving Failing` | The headline state. **Real** archiver failure (see above). Badge, drawer banner, `critical` Issue and the AI context must all agree while every pod is Ready. |
-| `pg/pg-unrecoverable` | `Unrecoverable` | Terminal phase outranking instance counts: red badge on a 2/2 row, with Instances and Primary muted + tooltipped. |
-| `pg/pg-doomed` | `Unrecoverable` | A second terminal cluster so the Status filter renders a count of `(2)`. A dropdown where every option reads `(1)` cannot distinguish "counts work" from "counts are always 1". |
+| `pg/pg-unrecoverable` | `Unrecoverable` | Terminal phase outranking instance counts: red badge on a 2/2 row, with Instances and Primary muted + tooltipped. Also the unresolvable-catalog case — see below. |
+| `pg/pg-doomed` | `Unrecoverable` | A second terminal cluster so the Status filter renders a count of `(2)`. A dropdown where every option reads `(1)` cannot distinguish "counts work" from "counts are always 1". Its image comes from an ImageCatalog, so `spec.imageName` is empty and only `status.image` says what is running. |
 
 ### Everything else
 
@@ -139,6 +139,76 @@ The last two are load-bearing. With only CNPG installed, a guard that matches
 everything and a guard that matches the right API group behave identically, so
 the collision handling cannot be verified at all.
 
+### Backup destinations — the plugin path
+
+| Resource | Kind | What it exercises |
+|---|---|---|
+| `pg/pg-store` | ObjectStore (`barmancloud.cnpg.io`) | The barman-cloud plugin's own destination CR, wired to `pg-doomed` via `spec.plugins` (see below for why not `pg-healthy`). Its recovery window lives in `status.serverRecoveryWindow`, keyed **by server name** — two servers here, one of which has failed since its last success. The field names are `firstRecoverabilityPoint` / `lastSuccessfulBackupTime` / `lastFailedBackupTime`; guessing them yields `unknown field` on patch and an empty section in the UI. |
+| `pg/pg-store-fresh` | ObjectStore | Declared, with an empty `status` — nothing has ever reported to it. The empty state has to read as "no backup yet", not as failure. |
+
+`spec.backup.barmanObjectStore` (in-tree, deprecated in 1.26) and the plugin
+`ObjectStore` are two different objects that answer the same question, and a
+cluster can use either. Both are present so the UI cannot quietly cover only one.
+
+`pg-store`'s window covers two servers while only `pg-doomed` appears under
+**Used By**, and that is not an inconsistency: the window is keyed by the server
+names the store holds backups *for*, and Used By lists the clusters currently
+archiving *to* it through `spec.plugins`. A store keeps a decommissioned
+cluster's backups until retention ages them out, so the two lists are expected to
+differ.
+
+**Why the plugin reference sits on `pg-doomed`.** `spec.plugins` is applied after
+the freeze, so the operator never rolls the instance pods with the plugin's
+sidecar — and every instance manager on that cluster then reports
+`ContinuousArchiving=False — wal archive plugin is not available`. Put that on
+`pg-healthy` and the baseline becomes a second WAL-archiving failure: two of the
+four badges collapse into one, quietly, while every other assertion still passes.
+`pg-doomed` is already terminal and a terminal phase outranks the condition, so
+its badge does not move. `assert_healthy_baseline` now checks both backup
+conditions on `pg-healthy` so this cannot come back unnoticed.
+
+### Declarative objects — `status.applied` has three values
+
+| Resource | Kind | State |
+|---|---|---|
+| `pg/demo-app` | Database | Applied. `retain` on delete. |
+| `pg/demo-reporting` | Database | Applied, `delete` on delete — the destructive reclaim policy, which must read differently. |
+| `pg/demo-broken` | Database | **Not applied**, with the operator's own error: the owner role does not exist. |
+| `pg/demo-app-pub` | Publication | Applied, publishes all tables of `demo_app`. |
+| `pg/demo-missing-pub` | Publication | Not applied — its database does not exist. |
+| `pg/demo-app-sub` | Subscription | Not applied — subscriptions need an `externalCluster` on the destination cluster, which this demo does not define. |
+
+All three `false` rows also appear on the **Issues** page with the operator's own
+error — the failure is not only renderable, it is reported. The `true` and
+absent rows raise nothing.
+
+The axis that matters is `applied: true` / `false` / **absent**. Absent means the
+operator has not reconciled it yet, and rendering that as failure condemns every
+object in its first seconds.
+
+These objects also name things by their PostgreSQL-side names (`demo_app`,
+`demo_app_pub`), which are not the Kubernetes names of the CRs that declare them
+(`demo-app`, `demo-app-pub`). Naming without resolving is the dead end the UI has
+to avoid.
+
+### Image catalogs
+
+| Resource | Kind | What it exercises |
+|---|---|---|
+| `pg/postgres-pinned` | ImageCatalog | Namespaced, and actually used: `pg-doomed` resolves its image from major 17 here. |
+| `postgres-fleet` | ClusterImageCatalog | Cluster-scoped, referenced from a namespace — the unscoped half of the lookup. Carries no major 15. |
+
+`pg-unrecoverable` is pinned to `postgres-fleet` major **15**, which the catalog
+does not list. That is CNPG's "incomplete or invalid image catalog", and it is
+invisible from the cluster side — the reference looks fine there. The catalog
+page is where it has to be visible.
+
+That pin is applied **after** the freeze, by the script, for a reason: a cluster
+created with an unresolvable catalog never gets an image and never reaches 2/2
+Ready, so it cannot be a fixture. `up` over an existing cluster unpins it first —
+`imageName` and `imageCatalogRef` are mutually exclusive and the CRD rejects a
+manifest carrying both.
+
 ## What to check in one pass
 
 1. **Clusters list** — four rows at 2/2, four different badges, every badge on one line, no clipped headers.
@@ -149,6 +219,10 @@ the collision handling cannot be verified at all.
 6. **Checks / audit** — `cnpgNoDeclarativeBackup` reports `evaluated 4 / passed 1`. Only `pg-wal-failing` passes, via its `method: plugin` ScheduledBackup — which is what makes the check demonstrably plugin-aware rather than merely asserted to be.
 7. **Backups list** — CNPG columns (Cluster / Method / Started); the Velero row renders Velero's set instead.
 8. **`kb-mysql`** — generic drawer, own sidebar group.
+9. **`pg-store`** — a recovery window per server, each server name opening its cluster; `pg-wal-failing` flagged as failing since its last success. `pg-store-fresh` says no backup has been reported, not that something is wrong.
+10. **`demo-broken`** — the operator's error verbatim; `demo-app-sub` reads as pending rather than failed.
+11. **`demo-app-pub`** — "In Database `demo_app`" is a link that lands on the `demo-app` Database, despite the two names differing.
+12. **`postgres-fleet`** — `pg-unrecoverable` listed under "pinned to a version this catalog does not list", with what that means. `pg-doomed`'s drawer names the catalog *and* the major, and still shows the image it is running.
 
 ## Live-operator variant
 

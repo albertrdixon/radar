@@ -1,3 +1,4 @@
+import type React from 'react'
 import { Shield, ShieldCheck, ShieldAlert, FileWarning, ListChecks, ChevronDown, ChevronRight } from 'lucide-react'
 import { clsx } from 'clsx'
 import { useState } from 'react'
@@ -225,6 +226,13 @@ export function PolicyReportRenderer({ data }: PolicyReportRendererProps) {
 
 interface KyvernoPolicyRendererProps {
   data: any
+  /** Filled by the host with the policy's coverage section — what this policy
+   *  actually decided about the cluster. */
+  coverage?: React.ReactNode
+  /** Filled by the host with the work this policy has queued and not finished.
+   *  The failure worth catching here is a pile-up, not one request, so it
+   *  belongs beside the policy rather than only on its own page. */
+  queued?: React.ReactNode
 }
 
 const ruleTypeColorMap: Record<string, string> = {
@@ -234,7 +242,7 @@ const ruleTypeColorMap: Record<string, string> = {
   verifyImages: 'bg-orange-500/20 text-orange-400',
 }
 
-export function KyvernoPolicyRenderer({ data }: KyvernoPolicyRendererProps) {
+export function KyvernoPolicyRenderer({ data, coverage, queued }: KyvernoPolicyRendererProps) {
   const spec = data.spec || {}
   const status = data.status || {}
   const conditions = status.conditions || []
@@ -249,9 +257,18 @@ export function KyvernoPolicyRenderer({ data }: KyvernoPolicyRendererProps) {
 
   return (
     <>
+      {coverage}
+      {queued}
       {/* Configuration */}
       <Section title="Configuration" icon={Shield}>
         <PropertyList>
+          {/* Audit / Enforce governs the rules that can REJECT — validation and
+              image verification. A policy whose rules only generate or mutate
+              carries the field inertly, and showing it as the policy's mode
+              reads as "this one only reports" about a policy that is actively
+              writing to the cluster. status.rulecount is Kyverno's own count,
+              so this is checkable rather than guessed. */}
+          {(ruleCountByType.validate > 0 || ruleCountByType.verifyImages > 0) && (
           <Property label="Failure Action" value={
             <span className={clsx(
               'badge',
@@ -260,6 +277,7 @@ export function KyvernoPolicyRenderer({ data }: KyvernoPolicyRendererProps) {
               {action}
             </span>
           } />
+          )}
           <Property label="Background" value={background ? 'Enabled' : 'Disabled'} />
           {spec.webhookTimeoutSeconds && (
             <Property label="Webhook Timeout" value={`${spec.webhookTimeoutSeconds}s`} />
@@ -342,7 +360,15 @@ export function KyvernoPolicyRenderer({ data }: KyvernoPolicyRendererProps) {
             {status.rulecount.validate !== undefined && <Property label="Validate" value={status.rulecount.validate} />}
             {status.rulecount.mutate !== undefined && <Property label="Mutate" value={status.rulecount.mutate} />}
             {status.rulecount.generate !== undefined && <Property label="Generate" value={status.rulecount.generate} />}
-            {status.rulecount.verifyImages !== undefined && <Property label="Verify Images" value={status.rulecount.verifyImages} />}
+            {/* All-lowercase in Kyverno's own status, so the camelCase read
+                dropped the only non-zero row on an image-verification policy
+                and left three zeros reading as "no rules". */}
+            {(status.rulecount.verifyImages ?? status.rulecount.verifyimages) !== undefined && (
+              <Property
+                label="Verify Images"
+                value={status.rulecount.verifyImages ?? status.rulecount.verifyimages}
+              />
+            )}
           </PropertyList>
         </Section>
       )}

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/skyhook-io/radar/pkg/k8score"
+	"github.com/skyhook-io/radar/pkg/policyreports"
 	batchv1 "k8s.io/api/batch/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -183,11 +184,31 @@ func SetTestClient(c *kubernetes.Clientset) *kubernetes.Clientset {
 	return prev
 }
 
+// SetTestPolicyReportIndex publishes a PolicyReport index directly, bypassing
+// CRD discovery and the informer warmup that normally build it.
+//
+// Publishing an index is also what makes GetPolicyReportStatus report Ready, so
+// this is the whole seam: the policy surfaces read exactly these two together.
+// Without it the per-policy handlers return their empty response before any of
+// the authorization logic runs, and a test against them would assert nothing
+// while appearing to cover the endpoint.
+//
+// Returns the previous index so a test can restore it.
+//
+// This is intended for integration tests only.
+func SetTestPolicyReportIndex(idx *policyreports.Index) *policyreports.Index {
+	prev := policyReportIndex.Load()
+	policyReportIndex.Store(idx)
+	return prev
+}
+
 // ResetTestState tears down the resource cache and resets all package-level
 // state so the next test starts clean.
 //
 // This is intended for integration tests only.
 func ResetTestState() {
+	policyReportIndex.Store(nil)
+
 	// Reset resource cache
 	ResetResourceCache()
 

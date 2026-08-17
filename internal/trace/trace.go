@@ -870,7 +870,7 @@ func classifyHopProbes(hop Hop) (failed, degraded, real int) {
 	// refused) can be hidden in the one-line verdict when a higher layer
 	// succeeded on the primary port (HTTP:80 OK). The per-probe ROW always
 	// shows that failure; only the summary verdict is coarse. A precise fix
-	// needs a per-(host,port) target model - see must-finish-later.
+	// needs a per-(host,port) target model.
 	var http, tls, tcp, dns []probe.Result
 	for _, p := range counted {
 		switch p.Layer {

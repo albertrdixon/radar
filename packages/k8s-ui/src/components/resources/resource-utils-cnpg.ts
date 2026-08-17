@@ -252,12 +252,19 @@ export function getCNPGClusterPhase(resource: any): string {
   return resource.status?.phase || '-'
 }
 
+// A cluster pinned to an ImageCatalog carries no `spec.imageName` at all — the
+// operator resolves the image from the catalog and records it in `status.image`.
+// Reading spec alone leaves those clusters showing a dash where an image runs.
+function cnpgImage(resource: any): string {
+  return resource.spec?.imageName || resource.status?.image || ''
+}
+
 export function getCNPGClusterImage(resource: any): string {
-  return resource.spec?.imageName || '-'
+  return cnpgImage(resource) || '-'
 }
 
 export function getCNPGClusterImageTag(resource: any): string {
-  const image = resource.spec?.imageName || ''
+  const image = cnpgImage(resource)
   if (!image) return '-'
   const parts = image.split(':')
   if (parts.length > 1) return parts[parts.length - 1]
@@ -292,6 +299,12 @@ export function getCNPGClusterUpdateStrategy(resource: any): string {
 }
 
 export const CNPG_BARMAN_PLUGIN_NAME = 'barman-cloud.cloudnative-pg.io'
+
+/** The API group ObjectStore is served under. `objectstores` is a generic
+ *  plural several operators ship, so every link to one has to be qualified —
+ *  an unqualified link resolves by plural alone and can land on a foreign CRD's
+ *  object of the same name. */
+export const CNPG_BARMAN_OBJECTSTORE_GROUP = 'barmancloud.cnpg.io'
 
 export interface CNPGBarmanPlugin {
   name: string
@@ -352,6 +365,180 @@ export function getCNPGClusterBackupConfig(resource: any): {
     plugin,
     rpoTrackedOnObjectStore: !!plugin && !resource.status?.lastSuccessfulBackup,
   }
+}
+
+// ============================================================================
+// DECLARATIVE OBJECTS — Database, Publication, Subscription
+// ============================================================================
+
+/**
+ * The three declarative kinds share one status shape: `applied` plus a
+ * `message`. The field has three meanings, not two — true, false, and absent —
+ * and absent is "the operator has not reconciled this yet", which is a
+ * different thing from failed. Collapsing them would report a freshly created
+ * object as broken.
+ */
+export function getCNPGDeclarativeStatus(resource: any): StatusBadge {
+  const applied = resource?.status?.applied
+  if (applied === true) return { text: 'Applied', color: healthColors.healthy, level: 'healthy' }
+  if (applied === false) return { text: 'Not Applied', color: healthColors.unhealthy, level: 'unhealthy' }
+  return { text: 'Pending', color: healthColors.unknown, level: 'unknown' }
+}
+
+/** The operator's own explanation for a failure. Never paraphrased. */
+export function getCNPGDeclarativeMessage(resource: any): string | undefined {
+  const m = resource?.status?.message
+  return typeof m === 'string' && m !== '' ? m : undefined
+}
+
+/**
+ * What happens in PostgreSQL when this CR is deleted.
+ *
+ * `delete` drops the real database, publication or subscription; `retain`
+ * leaves it. This is the difference between removing a manifest and losing
+ * data, so it is surfaced rather than left in the YAML. CNPG defaults to
+ * `retain` when unset.
+ */
+export function getCNPGReclaimPolicy(resource: any): { value: string; destructive: boolean } {
+  const spec = resource?.spec ?? {}
+  const raw =
+    spec.databaseReclaimPolicy ?? spec.publicationReclaimPolicy ?? spec.subscriptionReclaimPolicy ?? 'retain'
+  return { value: raw, destructive: String(raw).toLowerCase() === 'delete' }
+}
+
+/** The Cluster this object is declared against. */
+export function getCNPGDeclarativeCluster(resource: any): string | undefined {
+  const n = resource?.spec?.cluster?.name
+  return typeof n === 'string' && n !== '' ? n : undefined
+}
+
+export interface CNPGImageCatalogEntry {
+  major: number
+  image: string
+}
+
+/** Major-version pins, sorted so the list does not reshuffle between reads. */
+export function getCNPGImageCatalogEntries(resource: any): CNPGImageCatalogEntry[] {
+  const raw = resource?.spec?.images
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((e: any) => typeof e?.image === 'string')
+    .map((e: any) => ({ major: Number(e.major), image: e.image as string }))
+    .sort((a, b) => a.major - b.major)
+}
+
+// ============================================================================
+// OBJECTSTORE (barmancloud.cnpg.io/v1) — the plugin-path backup destination
+// ============================================================================
+
+export const CNPG_BARMAN_GROUP = 'barmancloud.cnpg.io'
+
+/**
+ * The plugin that took (or will take) a Backup / ScheduledBackup, from
+ * `spec.pluginConfiguration`. Present only when `spec.method` is `plugin`; the
+ * in-tree path leaves it unset, so absence is meaningful rather than missing.
+ */
+export function getCNPGBackupPlugin(resource: any): { name: string; parameters?: Record<string, any> } | null {
+  if (resource?.spec?.method !== 'plugin') return null
+  const cfg = resource?.spec?.pluginConfiguration
+  if (!cfg?.name) return null
+  return { name: cfg.name, parameters: cfg.parameters }
+}
+
+/** True for a barman-cloud ObjectStore. The `objectstores` plural is generic
+ *  enough to belong to another operator, so kind alone is not enough. */
+export function isCNPGObjectStore(resource: any): boolean {
+  return typeof resource?.apiVersion === 'string' && resource.apiVersion.startsWith(`${CNPG_BARMAN_GROUP}/`)
+}
+
+/** Which cloud the credentials point at. Only the provider is reported — the
+ *  values are Secret references and never belong on screen. */
+export function getCNPGObjectStoreProvider(resource: any): string | undefined {
+  const c = resource?.spec?.configuration
+  if (!c) return undefined
+  if (c.s3Credentials) return 'S3'
+  if (c.azureCredentials) return 'Azure Blob Storage'
+  if (c.googleCredentials) return 'Google Cloud Storage'
+  return undefined
+}
+
+/**
+ * The Secret holding the destination's credentials, by name only.
+ *
+ * Named rather than read: the values never belong on screen, but "which Secret"
+ * is the first question when a backup fails on authentication, and a page that
+ * says only "S3" leaves nowhere to go.
+ */
+export function getCNPGObjectStoreCredentialSecret(resource: any): string | undefined {
+  const c = resource?.spec?.configuration
+  const ref =
+    c?.s3Credentials?.accessKeyId ??
+    c?.azureCredentials?.storageAccount ??
+    c?.azureCredentials?.connectionString ??
+    c?.googleCredentials?.applicationCredentials
+  return typeof ref?.name === 'string' && ref.name !== '' ? ref.name : undefined
+}
+
+export interface CNPGObjectStoreRecoveryWindow {
+  server: string
+  firstRecoverabilityPoint?: string
+  lastSuccessfulBackupTime?: string
+  lastFailedBackupTime?: string
+  /** A failure newer than the last success — the window has stopped advancing. */
+  failingSinceLastSuccess: boolean
+}
+
+/**
+ * The recovery window per PostgreSQL server, from
+ * `status.serverRecoveryWindow` — a map keyed by server name.
+ *
+ * This is the payload the Cluster page promises and cannot show: a
+ * plugin-backed Cluster publishes no recovery-point fields of its own, so this
+ * is the only place the restorable range exists.
+ */
+export function getCNPGObjectStoreRecoveryWindows(resource: any): CNPGObjectStoreRecoveryWindow[] {
+  const raw = resource?.status?.serverRecoveryWindow
+  if (!raw || typeof raw !== 'object') return []
+  return Object.entries(raw)
+    .map(([server, w]: [string, any]) => {
+      const lastSuccess = w?.lastSuccessfulBackupTime
+      const lastFailed = w?.lastFailedBackupTime
+      return {
+        server,
+        firstRecoverabilityPoint: w?.firstRecoverabilityPoint,
+        lastSuccessfulBackupTime: lastSuccess,
+        lastFailedBackupTime: lastFailed,
+        failingSinceLastSuccess:
+          !!lastFailed && (!lastSuccess || new Date(lastFailed) > new Date(lastSuccess)),
+      }
+    })
+    .sort((a, b) => a.server.localeCompare(b.server))
+}
+
+/**
+ * Health for the list badge.
+ *
+ * `unknown` rather than healthy when no server has reported: an ObjectStore
+ * with an empty status is configured but holds nothing restorable, and green
+ * there would assert a recovery point that does not exist.
+ */
+export function getCNPGObjectStoreStatus(resource: any): StatusBadge {
+  const windows = getCNPGObjectStoreRecoveryWindows(resource)
+  if (windows.length === 0) {
+    return { text: 'No backups yet', color: healthColors.unknown, level: 'unknown' }
+  }
+  if (windows.some((w) => w.failingSinceLastSuccess)) {
+    return { text: 'Backups Failing', color: healthColors.unhealthy, level: 'unhealthy' }
+  }
+  return { text: 'Recoverable', color: healthColors.healthy, level: 'healthy' }
+}
+
+export function getCNPGObjectStoreDestination(resource: any): string {
+  return resource?.spec?.configuration?.destinationPath || '-'
+}
+
+export function getCNPGObjectStoreRetention(resource: any): string | undefined {
+  return resource?.spec?.retentionPolicy
 }
 
 export function getCNPGClusterMonitoring(resource: any): {
@@ -766,4 +953,33 @@ export function getCNPGVolumeHealth(resource: any): CNPGVolumeHealth | null {
     health.resizing.length > 0 ||
     health.initializing.length > 0
   return reportedAnything ? health : null
+}
+
+/**
+ * Splits declarative objects by what the operator has actually said about them.
+ *
+ * Three buckets, not two. `applied: true` is live. `applied: false` is a failure
+ * the operator can explain. ABSENT is not yet reconciled — and folding that in
+ * with the failures tells the reader an object "exists in Kubernetes and not in
+ * PostgreSQL" during the seconds before anything has looked at it.
+ */
+export function splitCNPGDeclarativeByApplied<T>(objects: T[]): {
+  applied: T[]
+  notApplied: T[]
+  pending: T[]
+} {
+  const out = { applied: [] as T[], notApplied: [] as T[], pending: [] as T[] }
+  for (const o of objects) {
+    switch (getCNPGDeclarativeStatus(o).level) {
+      case 'healthy':
+        out.applied.push(o)
+        break
+      case 'unhealthy':
+        out.notApplied.push(o)
+        break
+      default:
+        out.pending.push(o)
+    }
+  }
+  return out
 }

@@ -42,3 +42,21 @@ spec:
   method: barmanObjectStore
   cluster:
     name: pg-healthy
+---
+# The plugin-method Backup. Every other Backup here uses the in-tree
+# barmanObjectStore method, so without this the plugin fields on the Backup
+# renderer have nothing in the cluster that can exercise them — the gap that
+# let them ship unlooked-at.
+apiVersion: postgresql.cnpg.io/v1
+kind: Backup
+metadata:
+  name: pg-backup-plugin
+  namespace: pg
+spec:
+  cluster:
+    name: pg-healthy
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
+    parameters:
+      barmanObjectName: pg-store

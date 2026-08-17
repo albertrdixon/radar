@@ -125,8 +125,40 @@ func detectCNPGIssues(gvr schema.GroupVersionResource, kind string, u *unstructu
 		return detectCNPGClusterIssues(gvr, kind, u)
 	case "Backup":
 		return detectCNPGBackupIssues(gvr, kind, u)
+	case "Database", "Publication", "Subscription":
+		return detectCNPGDeclarativeIssues(gvr, kind, u)
 	}
 	return nil
+}
+
+// A declared object the operator could not apply.
+//
+// This is the one CNPG failure with no other signal anywhere: the CR exists,
+// the cluster is healthy, every count is green, and the database simply is not
+// there. The operator writes the reason into `status.message` and nothing reads
+// it, so the failure is invisible unless someone opens that specific object.
+//
+// `applied` is deliberately three-valued and only `false` is a failure. Absent
+// means the operator has not reconciled it yet — reporting that would raise an
+// issue against every declarative object for the first seconds of its life.
+func detectCNPGDeclarativeIssues(gvr schema.GroupVersionResource, kind string, u *unstructured.Unstructured) []Issue {
+	applied, found, err := unstructured.NestedBool(u.Object, "status", "applied")
+	if err != nil || !found || applied {
+		return nil
+	}
+
+	ns, name := u.GetNamespace(), u.GetName()
+	// The operator's own words. Without them this says something is wrong and
+	// leaves the reader to go find out what, which is the state we are fixing.
+	msg, _, _ := unstructured.NestedString(u.Object, "status", "message")
+	base := fmt.Sprintf("%s is declared in Kubernetes but was not applied to PostgreSQL", kind)
+	if msg == "" {
+		base += " and the operator gave no reason"
+	}
+
+	return []Issue{newConditionIssue(gvr, kind, ns, name, SeverityWarning,
+		"CNPGDeclarativeNotApplied", cnpgMessage(base, "", msg), 0,
+		"CNPGDeclarativeNotApplied", u.GetCreationTimestamp().Time)}
 }
 
 // Every CNPG issue carries a Fingerprint because one cluster genuinely has

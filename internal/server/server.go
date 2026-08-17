@@ -532,6 +532,8 @@ func (s *Server) setupAppRoutes(r chi.Router) {
 			r.Get("/rbac/role/{kind}/{namespace}/{name}", s.handleRBACRole)
 			r.Get("/rbac/namespace/{namespace}", s.handleRBACNamespace)
 			r.Get("/rbac/whoami", s.handleRBACWhoami)
+			r.Get("/cnpg/imagecatalogs/{namespace}/{name}/clusters", s.handleCNPGCatalogUsers)
+			r.Get("/cnpg/clusterimagecatalogs/{name}/clusters", s.handleCNPGCatalogUsers)
 
 			r.Get("/namespaces", s.handleNamespaces)
 			r.Get("/api-resources", s.handleAPIResources)
@@ -555,6 +557,9 @@ func (s *Server) setupAppRoutes(r chi.Router) {
 			// carry its own coverage state: an empty list here means one of four
 			// things and the response says which.
 			r.Get("/policy/resource/{kind}/{namespace}/{name}", s.handlePolicyResource)
+			// The inverse: every resource one policy recorded an outcome for.
+			r.Get("/policy/policies/{policy}", s.handlePolicyCoverage)
+			r.Get("/policy/policies/{policy}/queued", s.handlePolicyQueued)
 			r.Get("/upgrade-readiness", s.handleUpgradeReadiness)
 
 			// Network path trace - path-shaped diagnosis for Service /
@@ -2358,6 +2363,7 @@ func (s *Server) handleListResources(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if includeSummary {
+		result = summarizeTypedList(kind, result)
 		result = applySummaryStrip(result)
 	}
 	s.writeJSON(w, result)

@@ -1,0 +1,101 @@
+# CNPG's declarative database objects. The image catalogs they used to sit
+# beside now live in 04-imagecatalogs.yaml, because a cluster references one.
+#
+# These reconcile for real against pg-healthy — the operator creates the
+# database, the publication and the subscription, and writes back
+# `status.applied`. Nothing here is patched, so the states are the operator's
+# own.
+#
+# The interesting axis is `applied`, which has three values and not two:
+#   true   the object exists in PostgreSQL
+#   false  the operator tried and failed, and `status.message` says why
+#   unset  not reconciled yet — which is not the same as failed
+#
+# `demo-broken` produces the false case honestly: it targets a database that
+# does not exist, so the operator reports a real error rather than a written one.
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: demo-app
+  namespace: pg
+spec:
+  cluster:
+    name: pg-healthy
+  name: demo_app
+  owner: app
+  encoding: UTF8
+  # Retain is the safe default and the one worth showing: deleting this CR
+  # leaves the real database in place. `delete` would drop it.
+  databaseReclaimPolicy: retain
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: demo-reporting
+  namespace: pg
+spec:
+  cluster:
+    name: pg-healthy
+  name: demo_reporting
+  owner: app
+  # The destructive setting, present so the UI has to distinguish the two.
+  databaseReclaimPolicy: delete
+---
+# Fails on purpose: the owner role does not exist, so the operator reports
+# applied=false with its own message.
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: demo-broken
+  namespace: pg
+spec:
+  cluster:
+    name: pg-healthy
+  name: demo_broken
+  owner: nobody-owns-this
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Publication
+metadata:
+  name: demo-app-pub
+  namespace: pg
+spec:
+  cluster:
+    name: pg-healthy
+  dbname: demo_app
+  name: demo_app_pub
+  target:
+    allTables: true
+  publicationReclaimPolicy: retain
+---
+# Targets a database that is not there, so the operator explains why it could
+# not be applied.
+apiVersion: postgresql.cnpg.io/v1
+kind: Publication
+metadata:
+  name: demo-missing-pub
+  namespace: pg
+spec:
+  cluster:
+    name: pg-healthy
+  dbname: no_such_database
+  name: demo_missing_pub
+  target:
+    allTables: true
+---
+# Subscriptions need an externalCluster on the destination Cluster, which this
+# demo does not define — so this one stays unapplied with the operator's
+# explanation. That is the state worth rendering: declared, not yet real.
+apiVersion: postgresql.cnpg.io/v1
+kind: Subscription
+metadata:
+  name: demo-app-sub
+  namespace: pg
+spec:
+  cluster:
+    name: pg-healthy
+  dbname: demo_app
+  name: demo_app_sub
+  externalClusterName: upstream
+  publicationName: demo_app_pub

@@ -1,4 +1,6 @@
 export { Tooltip, WithTooltip } from './Tooltip'
+export { CronValue, TimeValue } from './ScheduleValue'
+export type { CronDialect } from './ScheduleValue'
 export { Badge } from './Badge'
 export type { BadgeSeverity, BadgeSize, BadgeTone } from './Badge'
 export { FreshnessControl } from './FreshnessControl'

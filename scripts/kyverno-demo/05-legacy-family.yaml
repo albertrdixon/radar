@@ -29,6 +29,49 @@ spec:
             containers:
               - image: "!*:latest"
 ---
+# Image verification, and the two ways a legacy policy's enforcement posture is
+# NOT what spec.validationFailureAction says.
+#
+# Kyverno defaults that field to Audit when it is absent, so a signing policy
+# reads as audit-only from the spec alone — but the action that governs it sits
+# on verifyImages[], and a rule-level failureAction overrides the spec-level one
+# rather than deferring to it. Verified against the admission controller on this
+# cluster: a pod running an unsigned busybox is REJECTED by
+# mutate.kyverno.svc-fail while the spec field still reads Audit.
+#
+# The key below is a well-formed PEM that is not a valid P-256 point, so
+# verification fails with an engine message rather than reaching a registry —
+# nothing here needs network or a real signature.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: legacy-verify-image-signature
+spec:
+  background: false
+  rules:
+    - name: verify-signature
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [policy-demo]
+      verifyImages:
+        - failureAction: Enforce
+          imageReferences:
+            # Kyverno normalizes a bare `busybox` to `docker.io/busybox:latest`,
+            # NOT to the `library/` path the registry actually serves — the
+            # `library/` spelling silently matches nothing and the rule looks
+            # inert.
+            - "docker.io/busybox*"
+          attestors:
+            - entries:
+                - keys:
+                    publicKeys: |-
+                      -----BEGIN PUBLIC KEY-----
+                      MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEG7ZaBRLGoLDe8mgSzKmXHiRb5kdc
+                      nqCcTVsBJmCPcCiRQBBWCbBTiEcNVK1lRNCTNCFcqmXBLmXmYqEjHNqNaQ==
+                      -----END PUBLIC KEY-----
+---
 # The cleanup controller runs under its own aggregated ClusterRole and can't
 # delete anything it hasn't been granted. Without this, creating the
 # ClusterCleanupPolicy below is rejected:

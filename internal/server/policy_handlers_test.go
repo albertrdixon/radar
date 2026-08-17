@@ -1,6 +1,10 @@
 package server
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/skyhook-io/radar/internal/k8s"
+)
 
 // Report producers are inconsistent about case across report families, so the
 // vocabulary is normalized before anything branches on it.
@@ -54,8 +58,8 @@ func TestPolicyCountsIncludePassesThatAreNotListed(t *testing.T) {
 // answer says nothing about whether the caller can see their policy results.
 func TestPolicyReportFamiliesCarryTheirOwnResourceNames(t *testing.T) {
 	byGroup := map[string]string{}
-	for _, f := range policyReportFamilies {
-		byGroup[f.group] = f.resource
+	for _, f := range k8s.PolicyReportFamilies {
+		byGroup[f.Group] = f.Namespaced
 	}
 	if got := byGroup["wgpolicyk8s.io"]; got != "policyreports" {
 		t.Errorf("wgpolicyk8s.io resource = %q, want policyreports", got)
@@ -63,7 +67,49 @@ func TestPolicyReportFamiliesCarryTheirOwnResourceNames(t *testing.T) {
 	if got := byGroup["openreports.io"]; got != "reports" {
 		t.Errorf("openreports.io resource = %q, want reports — it is NOT policyreports", got)
 	}
-	if len(policyReportFamilies) != 2 {
-		t.Errorf("expected both families to be authorized against, got %d", len(policyReportFamilies))
+	if len(k8s.PolicyReportFamilies) != 2 {
+		t.Errorf("expected both families to be authorized against, got %d", len(k8s.PolicyReportFamilies))
+	}
+}
+
+// A cluster-scoped finding was read from a cluster-scoped report, and permission
+// on the namespaced resource says nothing about it: `list policyreports`
+// cluster-wide is a different grant from `list clusterpolicyreports`. Asking the
+// namespaced question about a cluster-scoped subject can only answer the wrong
+// one — in either direction.
+func TestPolicyReportResourceFollowsSubjectScope(t *testing.T) {
+	for _, f := range k8s.PolicyReportFamilies {
+		if got := f.ResourceAt("kube-system"); got != f.Namespaced {
+			t.Errorf("%s namespaced resource = %q, want %q", f.Group, got, f.Namespaced)
+		}
+		if got := f.ResourceAt(""); got != f.ClusterScoped {
+			t.Errorf("%s cluster-scoped resource = %q, want %q", f.Group, got, f.ClusterScoped)
+		}
+		if f.Namespaced == f.ClusterScoped {
+			t.Errorf("%s uses one resource name for both scopes", f.Group)
+		}
+	}
+}
+
+// The listed subjects are only the non-passing ones, so a rule's missing rows
+// have two possible causes and the client cannot distinguish them from
+// HiddenByFilter alone: it counts passing subjects too. Without the split, a
+// rule whose only failure sits outside the namespace filter looks capped, and
+// the UI offers to load rows that no higher limit will ever return.
+func TestHiddenNotableSeparatesTheFilterFromTheCap(t *testing.T) {
+	var bucket PolicyCoverageRule
+	for _, result := range []string{"pass", "pass", "fail", "warn", "error", "skip"} {
+		bucket.HiddenByFilter++
+		if !isPolicyPassResult(result) {
+			bucket.HiddenNotable++
+		}
+	}
+	if bucket.HiddenByFilter != 6 {
+		t.Errorf("HiddenByFilter = %d, want 6", bucket.HiddenByFilter)
+	}
+	// Every non-passing result counts: warn, error and skip are listed as rows
+	// exactly like fail, so leaving any of them out re-creates the same gap.
+	if bucket.HiddenNotable != 4 {
+		t.Errorf("HiddenNotable = %d, want 4", bucket.HiddenNotable)
 	}
 }

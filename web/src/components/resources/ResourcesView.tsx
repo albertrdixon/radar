@@ -49,6 +49,13 @@ const LARGE_RESOURCE_LIST_GUARD_KEYS = new Set([
   'apps/ReplicaSet',
   'discovery.k8s.io/EndpointSlice',
 ])
+// Kinds the server slims with ?include=summary: rows carry only the fields the
+// table reads (5–8x smaller for pods — a production pod is ~9–13KB raw,
+// ~1–2.5KB slimmed), so the browser holds far more rows before the guard must
+// block. The detail drawer is unaffected — row clicks always refetch the full
+// object.
+const SUMMARY_LIST_KINDS = new Set(['Pod', 'apps/ReplicaSet'])
+const SUMMARY_LIST_LIMIT = 50000
 
 const deniedWorkloadWrites: WorkloadWritePermissions = {
   deployments: false,
@@ -189,13 +196,17 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
   const selectedCountKnown = selectedCountKey ? hasResourceCount(countsData?.counts, selectedCountKey) : false
   const selectedCountUnavailable = selectedCountKey ? countsData?.unavailable?.includes(selectedCountKey) ?? false : false
   const isSelectedKindGuarded = selectedCountKey !== '' && LARGE_RESOURCE_LIST_GUARD_KEYS.has(selectedCountKey)
+  const selectedKindSummaryServed = SUMMARY_LIST_KINDS.has(selectedCountKey)
+  const selectedKindRowLimit = selectedKindSummaryServed ? SUMMARY_LIST_LIMIT : LARGE_RESOURCE_LIST_LIMIT
   const waitingForGuardCount = isSelectedKindGuarded && !countsData && !countsIsError
-  const largeListBlocked = isSelectedKindGuarded && countsData != null && (selectedCountUnavailable || (selectedCountKnown && (selectedCount ?? 0) > LARGE_RESOURCE_LIST_LIMIT))
+  const largeListBlocked = isSelectedKindGuarded && countsData != null && (selectedCountUnavailable || (selectedCountKnown && (selectedCount ?? 0) > selectedKindRowLimit))
   const selectedKindQueryBlocked = waitingForGuardCount || largeListBlocked
   const podCount = countsData?.counts.Pod
   const podCountKnown = hasResourceCount(countsData?.counts, 'Pod')
   const podCountUnavailable = countsData?.unavailable?.includes('Pod') ?? false
-  const podCountAllowsBulkMetrics = countsData != null && podCountKnown && !podCountUnavailable && (podCount ?? 0) <= LARGE_RESOURCE_LIST_LIMIT
+  // Metrics rows are ~100B each (ns/name + cpu/mem), so they track the pods
+  // guard rather than the raw-list limit.
+  const podCountAllowsBulkMetrics = countsData != null && podCountKnown && !podCountUnavailable && (podCount ?? 0) <= SUMMARY_LIST_LIMIT
   const selectedKindName = selectedKind?.name.toLowerCase() ?? ''
   const topPodMetricsEnabled = selectedKindName === 'pods' && podCountAllowsBulkMetrics
   // Node metrics back the Nodes table and, for the Pods table, the pod-vs-node
@@ -210,7 +221,7 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
         kind: selectedKind.name,
         count: selectedCountUnavailable ? undefined : selectedCount,
         reason: selectedCountUnavailable ? 'count-unavailable' as const : 'too-many' as const,
-        limit: LARGE_RESOURCE_LIST_LIMIT,
+        limit: selectedKindRowLimit,
         namespaces,
       }
     : null
@@ -223,6 +234,7 @@ export function ResourcesView({ namespaces, selectedResource, onResourceClick, o
       const params = new URLSearchParams()
       if (namespaces.length > 0) params.set('namespaces', namespacesParam)
       if (isSelectedCrd && selectedKind.group) params.set('group', selectedKind.group)
+      if (selectedKindSummaryServed) params.set('include', 'summary')
       const startedAt = performance.now()
       debugNamespaceLog('resources:selected-kind-fetch-start', {
         kind: selectedKind.name,

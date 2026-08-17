@@ -114,32 +114,42 @@ func InitAllSubsystems(ctx context.Context, progress func(string)) error {
 		}
 
 		// CRD warmup and full discovery run in background.
+		// Do NOT use InitAllSubsystems' ctx: callers cancel it as soon as
+		// critical sync returns (InitializeCluster defer cancel /
+		// ContextSwitchTimeout). Deferred typed LISTs can still take minutes
+		// on large clusters — that cancel would abort CRD work entirely.
+		// OperationContext survives until CancelOngoingOperations (context
+		// switch / retry / auth-loss), which is the right lifetime.
 		if dc := GetDynamicResourceCache(); dc != nil {
 			go func() {
 				crdStart := time.Now()
-				func() {
-					defer func() {
-						if r := recover(); r != nil {
-							buf := make([]byte, 4096)
-							n := runtime.Stack(buf, false)
-							log.Printf("PANIC in CRD warmup: %v\n%s", r, buf[:n])
-						}
-					}()
-					wt := time.Now()
-					RegisterSupportedCRDFallbacks()
-					WarmupCommonCRDs()
-					logTiming("   CRD warmup: %v (background)", time.Since(wt))
-				}()
-				dt := time.Now()
-				dc.DiscoverAllCRDs()
-				logTiming("   CRD full discovery: %v (background)", time.Since(dt))
-				// Conditional Kyverno warmup runs after discovery so the
-				// IsKyvernoInstalled() signal sees every CRD that landed
-				// during WarmupCommonCRDs or DiscoverAllCRDs (admin may
-				// have installed Kyverno after Radar started).
-				pt := time.Now()
-				WarmupKyvernoPolicyReports()
-				logTiming("   Kyverno PolicyReport warmup: %v (background)", time.Since(pt))
+				lifecycleCtx := OperationContext()
+				deferredDone := cache.DeferredDone()
+				stillCurrent := func() bool {
+					return GetDynamicResourceCache() == dc && GetResourceCache() == cache
+				}
+				runCRDWarmupSequence(lifecycleCtx, deferredDone, stillCurrent,
+					func() {
+						wt := time.Now()
+						RegisterSupportedCRDFallbacks()
+						WarmupCommonCRDs()
+						logTiming("   CRD warmup: %v (background)", time.Since(wt))
+					},
+					func() {
+						dt := time.Now()
+						dc.DiscoverAllCRDs()
+						logTiming("   CRD full discovery: %v (background)", time.Since(dt))
+					},
+					func() {
+						// Conditional Kyverno warmup runs after discovery so the
+						// IsKyvernoInstalled() signal sees every CRD that landed
+						// during WarmupCommonCRDs or DiscoverAllCRDs (admin may
+						// have installed Kyverno after Radar started).
+						pt := time.Now()
+						WarmupKyvernoPolicyReports()
+						logTiming("   Kyverno PolicyReport warmup: %v (background)", time.Since(pt))
+					},
+				)
 				logTiming("   CRD total (warmup+discovery): %v (background)", time.Since(crdStart))
 			}()
 		}
@@ -206,6 +216,55 @@ func InitAllSubsystems(ctx context.Context, progress func(string)) error {
 	logTiming(" InitAllSubsystems total: %v", time.Since(subsystemStart))
 
 	return nil
+}
+
+// runCRDWarmupSequence runs the background CRD warmup/discovery steps in
+// order, after the deferred typed informers finish their initial sync. The CRD
+// probes and LISTs share the apiserver connection and rate-limit budget with
+// the deferred LISTs — ReplicaSets and Secrets, the heaviest kinds on large
+// clusters — so letting them race starves the sync that resource views block
+// on. deferredDone always closes, even when deferred sync fails or no kinds
+// are deferred, so the gate cannot wedge; ctx cancellation (context switch /
+// CancelOngoingOperations) abandons the wait and any remaining steps.
+//
+// stillCurrent, when non-nil, is checked after the gate and between steps so a
+// sequence that outlives a context switch does not run against a replaced
+// cache. Pass nil in tests that drive the helper directly.
+func runCRDWarmupSequence(ctx context.Context, deferredDone <-chan struct{}, stillCurrent func() bool, steps ...func()) {
+	if deferredDone != nil {
+		gateStart := time.Now()
+		select {
+		case <-deferredDone:
+			logTiming("   CRD warmup gate: deferred informers done after %v (background)", time.Since(gateStart))
+		case <-ctx.Done():
+			log.Printf("CRD warmup abandoned during deferred gate after %v: %v", time.Since(gateStart), ctx.Err())
+			return
+		}
+	}
+	if stillCurrent != nil && !stillCurrent() {
+		log.Printf("CRD warmup abandoned: cluster caches replaced during deferred gate")
+		return
+	}
+	for _, step := range steps {
+		if ctx.Err() != nil {
+			log.Printf("CRD warmup abandoned between steps: %v", ctx.Err())
+			return
+		}
+		if stillCurrent != nil && !stillCurrent() {
+			log.Printf("CRD warmup abandoned: cluster caches replaced between steps")
+			return
+		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					buf := make([]byte, 4096)
+					n := runtime.Stack(buf, false)
+					log.Printf("PANIC in CRD warmup step: %v\n%s", r, buf[:n])
+				}
+			}()
+			step()
+		}()
+	}
 }
 
 // ResetAllSubsystems tears down all subsystems in reverse order of init.

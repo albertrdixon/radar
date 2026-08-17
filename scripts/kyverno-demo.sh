@@ -15,6 +15,10 @@
 #                 full of them.
 #   modern-only   Remove the legacy kyverno.io policy CRDs to reproduce the
 #                 Kyverno 1.20 API surface. READ THE WARNING IT PRINTS.
+#   queue         Queue a burst of UpdateRequests so the page has something on
+#                 it. They are garbage-collected seconds after completing, so
+#                 they cannot be a standing fixture. `queue clean` removes the
+#                 probe and the 250 NetworkPolicies it generates.
 #   help          Show this message.
 #
 # Prerequisites:
@@ -161,6 +165,27 @@ EOF
   fail "Kyverno webhook never became ready — check 'kubectl -n kyverno get pods'"
 }
 
+# 250 ConfigMaps so `audit-owner-label` has more subjects than the coverage view
+# lists at once, exercising its fold and truncation paths. Generated rather than
+# checked in: 250 near-identical manifests is noise in a fixtures directory, and
+# the count is the only thing that matters.
+#
+# BULK_SUBJECTS=0 skips them for a faster bootstrap.
+seed_bulk_subjects() {
+  local n="${BULK_SUBJECTS:-250}"
+  [ "${n}" = "0" ] && { note "BULK_SUBJECTS=0 - skipping bulk ConfigMaps"; return 0; }
+
+  step "Seeding ${n} ConfigMaps for the bulk-subject policy"
+  {
+    local i=1
+    while [ "${i}" -le "${n}" ]; do
+      printf -- '---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: bulk-%03d\n  namespace: policy-demo\n  labels:\n    demo: bulk\ndata:\n  note: "subject %d of %d for audit-owner-label"\n' "${i}" "${i}" "${n}"
+      i=$((i + 1))
+    done
+  } | k apply -f - >/dev/null
+  ok "${n} ConfigMaps created (labelled demo=bulk, deliberately missing owner)"
+}
+
 apply_fixtures() {
   step "Applying Kyverno demo fixtures"
   [ -d "${FIXTURES_DIR}" ] || fail "Fixtures dir not found: ${FIXTURES_DIR}"
@@ -190,7 +215,49 @@ apply_fixtures() {
       sleep 3
     done
   done < <(find "${FIXTURES_DIR}" -maxdepth 1 -type f -name '*.yaml' | sort)
+seed_bulk_subjects
+  trigger_generate_rule
+
   ok "Fixtures applied"
+}
+
+# Creates the ConfigMap that fires `legacy-generate-companion`, once the policy
+# is actually intercepting ConfigMaps.
+#
+# Ordering is the whole point. The rule sets `skipBackgroundRequests: true`, so
+# generation happens on admission and only on admission: a trigger created
+# before Kyverno rebuilds its webhook is never looked at again. The failure is
+# silent — a labelled ConfigMap, no NetworkPolicy, no event, no error.
+trigger_generate_rule() {
+  step "Triggering the legacy generate rule"
+
+  k wait --for=condition=Ready clusterpolicy/legacy-generate-companion --timeout=120s >/dev/null 2>&1 \
+    || warn "legacy-generate-companion did not report Ready — generation may not fire"
+
+  # Deleted first so this is a CREATE, and the label is part of that CREATE —
+  # labelling afterwards would rely on the rule also matching UPDATE.
+  k -n policy-demo delete configmap needs-a-companion --ignore-not-found >/dev/null
+  k apply -f - >/dev/null <<'YAML' || fail "could not create the generate trigger ConfigMap"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: needs-a-companion
+  namespace: policy-demo
+  labels:
+    needs-companion: "true"
+data:
+  note: "triggers legacy-generate-companion, which generates needs-a-companion-companion"
+YAML
+
+  local i
+  for i in $(seq 1 20); do
+    if k -n policy-demo get networkpolicy needs-a-companion-companion >/dev/null 2>&1; then
+      ok "needs-a-companion → generated needs-a-companion-companion"
+      return 0
+    fi
+    sleep 3
+  done
+  warn "no NetworkPolicy was generated — the generate rule fired nothing"
 }
 
 wait_for_reports() {
@@ -374,6 +441,44 @@ cmd_status() {
   note "fragments Kyverno across as many buckets as it has policy types."
 }
 
+# Applies the UpdateRequest probe, or removes it.
+#
+# `spec.plugins`-style standing fixtures do not work for UpdateRequests: Kyverno
+# garbage-collects them within seconds of Completed. This produces a burst on
+# demand so the page has something on it — the generate request stays Pending
+# longest and is the one worth opening.
+cmd_queue() {
+  local probe="${FIXTURES_DIR}/queue-probe.yaml"
+  [ -f "${probe}" ] || fail "probe not found: ${probe}"
+
+  if [ "${1:-}" = "clean" ]; then
+    step "Removing the UpdateRequest probe and everything it created"
+    k delete -f "${probe}" --ignore-not-found >/dev/null
+    k -n policy-demo delete networkpolicy -l generated-by=probe-generate-existing --ignore-not-found >/dev/null
+    k -n policy-demo label configmap -l demo=bulk probe-mutated- >/dev/null 2>&1 || true
+    ok "probe removed"
+    return 0
+  fi
+
+  step "Queueing UpdateRequests"
+  k apply -f "${probe}" >/dev/null || fail "could not apply the probe"
+
+  local n=0 i
+  for i in $(seq 1 20); do
+    n=$(k get updaterequests.kyverno.io -A --no-headers 2>/dev/null | wc -l | tr -d ' ')
+    [ "${n:-0}" -gt 0 ] && break
+    sleep 2
+  done
+  if [ "${n:-0}" = "0" ]; then
+    warn "no UpdateRequests appeared — the background controller may not be running"
+    return 0
+  fi
+  ok "${n} UpdateRequest(s) queued"
+  note "They are deleted seconds after they complete. Open one now:"
+  note "  kubectl get updaterequests.kyverno.io -A"
+  note "Run '$0 queue clean' to remove the probe and the 250 NetworkPolicies it makes."
+}
+
 cmd_help() {
   sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
@@ -385,6 +490,7 @@ case "${1:-help}" in
   status)      cmd_status      ;;
   openreports) cmd_openreports ;;
   modern-only) cmd_modern_only ;;
+  queue)       cmd_queue "${2:-}" ;;
   help|-h|--help) cmd_help     ;;
   *)
     printf "${C_RED}Unknown subcommand: %s${C_RESET}\n\n" "$1"

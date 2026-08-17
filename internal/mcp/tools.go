@@ -1172,7 +1172,16 @@ func buildMCPResourceContextWithStaleChecks(ctx context.Context, obj runtime.Obj
 
 	// Wired unconditionally: a nil index is exactly the case that needs to
 	// report WHY it is nil.
-	opts.PolicyReports = mcpPolicyReportLookupAdapter{idx: k8s.GetPolicyReportIndex(), status: k8s.GetPolicyReportStatus()}
+	opts.PolicyReports = mcpPolicyReportLookupAdapter{
+		idx:    k8s.GetPolicyReportIndex(),
+		status: k8s.GetPolicyReportStatus(),
+		// canReadInNamespace is this package's mirror of Server.canRead, so the
+		// MCP surface authorizes report families against the same table and the
+		// same scope rule the UI does.
+		families: k8s.ReadablePolicyReportFamilies(namespace, func(group, resource, ns string) bool {
+			return canReadInNamespace(ctx, group, resource, ns, "list")
+		}),
+	}
 
 	if topo, prov, dyn, ok := mcpTopologyForContext(namespace); ok {
 		opts.Topology = topo

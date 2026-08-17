@@ -64,13 +64,37 @@ import (
 type policyReportLookupAdapter struct {
 	idx    *policyreports.Index
 	status k8s.PolicyReportStatus
+	// families this caller may read, by report API group. The UI withholds
+	// findings from the rest; an agent asking about the same resource has to be
+	// told the same thing, or the answer depends on which surface was used.
+	families map[string]bool
 }
 
 // Unavailable implements resourcecontext.PolicyReportAvailability so a
 // resource whose policy findings could not be read says so, instead of being
 // indistinguishable from a resource with no violations.
 func (a policyReportLookupAdapter) Unavailable() (resourcecontext.OmittedReason, bool) {
-	return a.status.OmittedReason()
+	// Install status first. With no policy engine there is nothing to withhold,
+	// and the mapping above is deliberately silent there — a denial note on every
+	// resource of every non-Kyverno cluster is noise rather than honesty, and a
+	// restricted caller fails the family SARs on that cluster precisely because
+	// the report kinds do not exist.
+	if reason, unavailable := a.status.OmittedReason(); unavailable {
+		return reason, true
+	}
+	if a.status.Status != k8s.KyvernoStatusReady {
+		return "", false
+	}
+	if len(a.families) == 0 {
+		return resourcecontext.OmittedRBACDenied, true
+	}
+	return "", false
+}
+
+// WithheldFor implements resourcecontext.PolicyReportWithholding: this subject
+// has findings the caller may not read, so an empty summary is not an all-clear.
+func (a policyReportLookupAdapter) WithheldFor(group, kind, namespace, name string) bool {
+	return k8s.PolicyFindingsWithheld(a.idx, a.families, group, kind, namespace, name)
 }
 
 func (a policyReportLookupAdapter) FindingsFor(group, kind, namespace, name string) []resourcecontext.KyvernoFinding {
@@ -81,7 +105,10 @@ func (a policyReportLookupAdapter) FindingsFor(group, kind, namespace, name stri
 	// and the index is shared with every other producer writing into the same
 	// report families — Trivy, Falco adapters, VAP evaluation. An unfiltered
 	// read would inflate the Kyverno rollup with enforcement Kyverno never did.
-	findings := a.idx.FindingsForAnyEngine(group, kind, namespace, name, policyreports.EnginesAttributableToKyverno...)
+	//
+	// Sourced, because the engine filter alone cannot tell which family an
+	// outcome was read from, and that is what this caller is authorized against.
+	findings := k8s.ReadableKyvernoFindings(a.idx, a.families, group, kind, namespace, name)
 	if len(findings) == 0 {
 		return nil
 	}
@@ -460,7 +487,14 @@ func (s *Server) buildAIResourceContext(r *http.Request, obj runtime.Object, kin
 	// tier (T10) will surface the top[] findings.
 	// Wired unconditionally: a nil index is exactly the case that needs to
 	// report WHY it is nil.
-	opts.PolicyReports = policyReportLookupAdapter{idx: k8s.GetPolicyReportIndex(), status: k8s.GetPolicyReportStatus()}
+	opts.PolicyReports = policyReportLookupAdapter{
+		idx:    k8s.GetPolicyReportIndex(),
+		status: k8s.GetPolicyReportStatus(),
+		// Authorized at the subject's own scope, exactly as the UI does it: a
+		// cluster-scoped resource asks about the cluster-scoped report kind,
+		// which is a different grant from the namespaced one.
+		families: s.readablePolicyReportFamilies(r, namespace),
+	}
 
 	if topo, prov, dyn, ok := s.topologyForContext(namespace); ok {
 		opts.Topology = topo

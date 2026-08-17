@@ -76,6 +76,28 @@ kubectl create configmap probe --from-literal=a=b -n policy-demo
 # admission webhook "vpol.validate.kyverno.svc-fail" denied the request
 ```
 
+The legacy family has the same problem in its own vocabulary, and
+`spec.validationFailureAction` is not the answer to it. Three policies in
+`policy-posture` isolate the ways that field misleads, all matching the one
+labelled ConfigMap in that namespace:
+
+| Resource | Renders | Why it matters |
+|---|---|---|
+| `posture-mixed-actions` | `Audit` | **Declares `Enforce` and rejects nothing.** Its validating rule overrides the action down to Audit and its only other rule mutates — a mutation failure is not a rejection, so the policy-wide `Enforce` governs nothing at all. |
+| `posture-rules-disagree` | `Enforce`, with **no** consequence sentence | Two validating rules, opposite actions. The sentence is one claim about one failing count and cannot say which rule a failure came from, so it is withheld rather than guessed: `posture-subject` fails only the auditing rule and is in no danger. |
+| `posture-unresolvable-context` | `Audit`, section open, **red** shield | Every result is `error` — a context entry names a ConfigMap that does not exist, so the rule never reaches a verdict. Nothing is checked and nothing is blocked, which is the state most easily mistaken for compliance. |
+
+```bash
+# Overridden to Audit by its own rule → NOT blocked, despite Enforce on the spec
+kubectl create configmap probe -n policy-posture --from-literal=a=b \
+  --dry-run=client -o yaml | kubectl label -f - --local -o yaml posture=subject a=present | kubectl apply -f -
+
+# The rule that really does reject, in the policy next to it
+kubectl create configmap probe2 -n policy-posture --from-literal=a=b \
+  --dry-run=client -o yaml | kubectl label -f - --local -o yaml posture=subject | kubectl apply -f -
+# admission webhook "validate.kyverno.svc-fail" denied the request
+```
+
 ### The rest of the modern family
 
 | Resource | Kind | What it exercises |
@@ -98,6 +120,8 @@ what the Last Run column exists to surface. No hand-patching required.
 | Resource | Kind | What it exercises |
 |---|---|---|
 | `legacy-disallow-latest-tag` | `kyverno.io` ClusterPolicy | Deprecated family still rendering; `Enforce`/`Audit` vocabulary |
+| `legacy-generate-companion` | `kyverno.io` ClusterPolicy | A **generate** rule on the legacy kind. The family lives in the rule block, not the kind, so anything reading the kind alone calls its `pass` result "passing" — the validate vocabulary, on a rule that validates nothing. Trigger: a ConfigMap labelled `needs-companion=true` in `policy-demo`; target: a NetworkPolicy named after it. |
+| `legacy-verify-image-signature` | `kyverno.io` ClusterPolicy | A **verifyImages** rule, where enforcement posture is not where it looks. Kyverno defaults `spec.validationFailureAction` to `Audit` when absent and writes the rule count under the all-lowercase key `verifyimages`, so a policy that rejects unsigned images reads as audit-only with no rules at all to anything trusting the obvious spellings. The action that governs it is `verifyImages[].failureAction`, and a rule-level action overrides the spec-level one rather than deferring to it. Matches only `docker.io/busybox*`, which no demo workload runs, so it blocks nothing during bootstrap — to see the rejection, create a busybox pod in `policy-demo` that satisfies `require-run-as-nonroot`. |
 | `legacy-cleanup-completed-pods` | `kyverno.io` ClusterCleanupPolicy | Deprecated-but-deployed; needs the aggregated cleanup ClusterRole |
 | `modern-exempt-monitoring` | `policies.kyverno.io` PolicyException | `policyRefs` + CEL `matchConditions` |
 | `legacy-exempt-latest-tag` | `kyverno.io/v2` PolicyException | `exceptions[].policyName` + `ruleNames` + any/all match |
@@ -106,6 +130,27 @@ what the Last Run column exists to surface. No hand-patching required.
 sidebar group collapsing two API groups, and the legacy-vs-modern renderer
 split only have meaning with both present. `PolicyException` is the sharpest
 case: same Kind, same plural, two groups, different spec shapes.
+
+### The two working records
+
+`UpdateRequest` and `EphemeralReport` are Kyverno's own bookkeeping, and neither
+can be a standing fixture — both are deleted within seconds of finishing. What
+they are worth is the state they hold while they exist: a generation that has
+queued and never run, and a scan's findings before they reach a PolicyReport.
+
+`./scripts/kyverno-demo.sh queue` produces a burst of UpdateRequests on demand;
+`queue clean` removes the probe and the 250 NetworkPolicies it generates.
+EphemeralReports need nothing — the background scanner regenerates them
+continuously, so the list is never empty for long.
+
+Three shapes make these easy to render blank, and all three were read off live
+objects rather than the CRD schema:
+
+| What | Reality |
+|---|---|
+| A **generate** UpdateRequest | `spec.resource` is `{}` and `spec.rule` is `""`. Every trigger is in `spec.ruleContext[].trigger`, and one request can hold hundreds. |
+| A **mutate** UpdateRequest | The opposite: `spec.resource` and `spec.rule` are populated, and there is no `ruleContext` at all. One request per trigger. |
+| An **EphemeralReport** | Findings live in `spec`, not `status`. `spec.owner` is present and **blank** — the subject is only in `metadata.ownerReferences` and the `audit.kyverno.io/resource.*` labels. Result timestamps are `{seconds, nanos}`, and `new Date()` on that is Invalid Date, not an error. |
 
 ### Reports and the engine taxonomy
 

@@ -1,0 +1,36 @@
+# A policy with more subjects than any UI lists at once.
+#
+# Every other fixture here has a handful of subjects, which means the
+# truncation and fold paths in the policy coverage view never render — and an
+# unrendered path is where the bugs live. This one exists purely to produce
+# them.
+#
+# ConfigMaps rather than workloads on purpose: 250 of them cost nothing to
+# schedule, where 250 Pods would not fit on a kind node and would make the
+# fixture unusable on a laptop.
+#
+# Audit rather than Deny, also on purpose. `implicit-deny-configmap-labels`
+# already rejects unlabelled ConfigMaps on CREATE in this namespace, so a
+# second Deny policy would block its own fixture from existing. These carry
+# `demo: bulk` (satisfying that policy) but no `owner` label, so they are
+# admitted and then reported as failing by this one.
+---
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: audit-owner-label
+spec:
+  validationActions:
+    - Audit
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        policy-demo: "true"
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["configmaps"]
+  validations:
+    - expression: "has(object.metadata.labels) && 'owner' in object.metadata.labels"
+      message: "ConfigMaps must carry an 'owner' label naming the responsible team"

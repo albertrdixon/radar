@@ -68,6 +68,12 @@ spec:
 # A second terminal cluster, so the Status filter shows a count of (2) on one
 # option rather than 1 on every option. A dropdown where every entry reads (1)
 # cannot distinguish "counts render" from "counts are always 1".
+#
+# It is also the one cluster that takes its image from an ImageCatalog instead
+# of a literal tag. `spec.imageName` is therefore absent, and anything reading
+# only spec shows a dash where an image is running — the resolved tag lives in
+# `status.image`. The catalog's major 17 entry is the same tag the other three
+# clusters use, so bootstrap behaviour is unchanged.
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -75,7 +81,11 @@ metadata:
   namespace: pg
 spec:
   instances: 2
-  imageName: ghcr.io/cloudnative-pg/postgresql:17.5
+  imageCatalogRef:
+    apiGroup: postgresql.cnpg.io
+    kind: ImageCatalog
+    name: postgres-pinned
+    major: 17
   storage:
     size: 256Mi
   resources:

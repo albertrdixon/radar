@@ -14,6 +14,7 @@ import {
   AlertBanner,
   LabelSelectorDisplay,
 } from '../../ui/drawer-components'
+import { CronValue, TimeValue } from '../../ui/ScheduleValue'
 import { KyvernoExpressionList } from './KyvernoPolicyShared'
 import {
   getKyvernoCleanupConditions,
@@ -225,9 +226,9 @@ export function KyvernoCleanupPolicyRenderer({ data }: { data: any }) {
 
       <Section title="Schedule" icon={Clock}>
         <PropertyList>
-          <Property label="Cron" value={schedule ? <span className="font-mono">{schedule}</span> : 'Not set'} />
+          <Property label="Cron" value={schedule ? <CronValue cron={schedule} /> : 'Not set'} />
           {propagation && <Property label="Deletion Propagation" value={propagation} />}
-          {lastExecution && <Property label="Last Execution" value={lastExecution} />}
+          {lastExecution && <Property label="Last Execution" value={<TimeValue timestamp={lastExecution} />} />}
         </PropertyList>
       </Section>
 
