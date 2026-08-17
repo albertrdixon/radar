@@ -63,7 +63,7 @@ func (s *Server) handleRolloutOperation(w http.ResponseWriter, r *http.Request) 
 	auth.AuditLog(r, namespace, name)
 	client := s.getDynamicClientForRequest(r)
 	if client == nil {
-		log.Printf("[rollouts] Dynamic client unavailable for %s Rollout %s/%s", action, sanitizeForLog(namespace), sanitizeForLog(name))
+		log.Printf("[rollouts] Dynamic client unavailable for %q Rollout %s/%s", action, sanitizeForLog(namespace), sanitizeForLog(name))
 		s.writeError(w, http.StatusServiceUnavailable, "cluster client not available — check cluster connection")
 		return
 	}
@@ -160,6 +160,6 @@ func (s *Server) writeRolloutError(w http.ResponseWriter, err error, action, nam
 	default:
 		status = http.StatusInternalServerError
 	}
-	log.Printf("[rollouts] %s %s/%s -> %d: %v", action, sanitizeForLog(namespace), sanitizeForLog(name), status, err)
+	log.Printf("[rollouts] %q %s/%s -> %d: %v", action, sanitizeForLog(namespace), sanitizeForLog(name), status, err)
 	s.writeError(w, status, err.Error())
 }
