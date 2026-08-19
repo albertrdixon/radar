@@ -26,6 +26,7 @@ import {
   CNPG_BARMAN_OBJECTSTORE_GROUP,
 } from '../resource-utils-cnpg'
 import { formatAge } from '../resource-utils'
+import { RecoveryTime } from './CNPGShared'
 
 interface CNPGClusterRendererProps {
   /** Filled by the host with the Databases, Publications and Subscriptions
@@ -402,13 +403,13 @@ export function CNPGClusterRenderer({ data, onNavigate, declared}: CNPGClusterRe
               <Property label="Retention" value={backupConfig.retentionPolicy} />
             )}
             {backupConfig.lastSuccessfulBackup && (
-              <Property label="Last Successful" value={backupConfig.lastSuccessfulBackup} />
+              <Property label="Last Successful" value={<RecoveryTime at={backupConfig.lastSuccessfulBackup} />} />
             )}
             {lastFailedBackup && (
-              <Property label="Last Failed" value={lastFailedBackup} />
+              <Property label="Last Failed" value={<RecoveryTime at={lastFailedBackup} />} />
             )}
             {backupConfig.firstRecoverabilityPoint && (
-              <Property label="First Recoverability" value={backupConfig.firstRecoverabilityPoint} />
+              <Property label="First Recoverability" value={<RecoveryTime at={backupConfig.firstRecoverabilityPoint} />} />
             )}
           </PropertyList>
           {/* Without this note the section renders empty on plugin-migrated

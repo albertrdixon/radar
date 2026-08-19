@@ -10,6 +10,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -162,6 +163,53 @@ func TestGetCascadeDeletePreview_RouteCollisionUsesGroup(t *testing.T) {
 	}
 }
 
+func TestGetCascadeDeletePreview_CalicoGroupCollisionUsesQualifiedRoot(t *testing.T) {
+	projectGVR := schema.GroupVersionResource{Group: "projectcalico.org", Version: "v3", Resource: "networkpolicies"}
+	legacyGVR := schema.GroupVersionResource{Group: "crd.projectcalico.org", Version: "v1", Resource: "networkpolicies"}
+	dp := &stubDP{
+		gvrByGroup: map[string]schema.GroupVersionResource{
+			"projectcalico.org/networkpolicies":     projectGVR,
+			"projectcalico.org/networkpolicy":       projectGVR,
+			"crd.projectcalico.org/networkpolicies": legacyGVR,
+			"crd.projectcalico.org/networkpolicy":   legacyGVR,
+		},
+		kindByGVR: map[schema.GroupVersionResource]string{
+			projectGVR: "NetworkPolicy",
+			legacyGVR:  "NetworkPolicy",
+		},
+	}
+	projectID := "caliconetworkpolicy/demo/shared/projectcalico.org"
+	legacyID := "caliconetworkpolicy/demo/shared/crd.projectcalico.org"
+	topo := &Topology{
+		Nodes: []Node{
+			{ID: projectID, Kind: KindCalicoNetworkPolicy, Name: "shared", Data: map[string]any{"namespace": "demo", "apiVersion": "projectcalico.org/v3"}},
+			{ID: legacyID, Kind: KindCalicoNetworkPolicy, Name: "shared", Data: map[string]any{"namespace": "demo", "apiVersion": "crd.projectcalico.org/v1"}},
+			{ID: "deployment/demo/project", Kind: KindDeployment, Name: "project", Data: map[string]any{"namespace": "demo"}},
+			{ID: "deployment/demo/legacy", Kind: KindDeployment, Name: "legacy", Data: map[string]any{"namespace": "demo"}},
+		},
+		Edges: []Edge{
+			{Source: projectID, Target: "deployment/demo/project", Type: EdgeManages},
+			{Source: legacyID, Target: "deployment/demo/legacy", Type: EdgeManages},
+		},
+	}
+
+	for _, test := range []struct {
+		group, wantDependent string
+	}{
+		{"projectcalico.org", "project"},
+		{"crd.projectcalico.org", "legacy"},
+	} {
+		t.Run(test.group, func(t *testing.T) {
+			preview := GetCascadeDeletePreview(ResourceRef{
+				Kind: "networkpolicies", Namespace: "demo", Name: "shared", Group: test.group,
+			}, topo, dp)
+			if !preview.RootResolved || len(preview.Dependents) != 1 || preview.Dependents[0].Name != test.wantDependent {
+				t.Fatalf("%s preview = %+v, want only %s dependent", test.group, preview, test.wantDependent)
+			}
+		})
+	}
+}
+
 // TestGetRelationships_PodHygieneFields covers T2: pods carry
 // ServiceAccount, Node, and ManagedBy refs derived from spec + labels.
 func TestGetRelationships_PodHygieneFields(t *testing.T) {
@@ -216,6 +264,50 @@ func TestGetRelationships_PodHygieneFields_EmptySAandUnscheduled(t *testing.T) {
 	rel := GetRelationships("Pod", "demo", "lone", topo, provider, nil)
 	if rel != nil {
 		t.Errorf("expected nil for pod with no edges and no hygiene data, got %+v", rel)
+	}
+}
+
+func TestGetRelationships_CalicoHostEndpointNode(t *testing.T) {
+	tests := []struct {
+		name       string
+		apiVersion string
+		node       string
+		wantNode   bool
+	}{
+		{name: "Calico CRD group", apiVersion: "crd.projectcalico.org/v1", node: "worker-1", wantNode: true},
+		{name: "Calico API group", apiVersion: "projectcalico.org/v3", node: "worker-1", wantNode: true},
+		{name: "foreign group", apiVersion: "networking.example.io/v1", node: "worker-1"},
+		{name: "near-match group", apiVersion: "extension.projectcalico.org/v1", node: "worker-1"},
+		{name: "missing node", apiVersion: "projectcalico.org/v3"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := map[string]any{}
+			if tt.node != "" {
+				spec["node"] = tt.node
+			}
+			endpoint := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": tt.apiVersion,
+				"kind":       "HostEndpoint",
+				"metadata":   map[string]any{"name": "infra-1"},
+				"spec":       spec,
+			}}
+
+			rel := GetRelationshipsWithObject("hostendpoints", "", "infra-1", endpoint, &Topology{}, nil, nil, nil)
+			if !tt.wantNode {
+				if rel != nil {
+					t.Fatalf("relationships = %+v, want nil", rel)
+				}
+				return
+			}
+			if rel == nil || rel.Node == nil {
+				t.Fatalf("relationships = %+v, want Node relationship", rel)
+			}
+			if *rel.Node != (ResourceRef{Kind: "Node", Name: "worker-1"}) {
+				t.Errorf("Node = %+v, want core Node/worker-1", rel.Node)
+			}
+		})
 	}
 }
 

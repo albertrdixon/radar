@@ -44,13 +44,14 @@ describe('ResourceRendererDispatch', () => {
   })
 })
 
-function renderKind(kind: string, data: any, namespace = ''): string {
+function renderKind(kind: string, data: any, namespace = '', onNavigate?: (ref: ResourceRef) => void): string {
   return renderToString(
     <ResourceRendererDispatch
       resource={{ kind, namespace, name: data?.metadata?.name || 'x' }}
       data={data}
       onCopy={() => {}}
       copied={null}
+      onNavigate={onNavigate}
       showCommonSections={false}
     />,
   )
@@ -153,11 +154,24 @@ describe('DRA renderers dispatch', () => {
 // so any third operator's CRD inherited whichever branch was the fallback.
 // ============================================================================
 
+// The spec field is a probe: GenericRenderer renders spec into a Specification
+// section, so its value appearing in the output is proof the fall-through
+// reached a renderer. A blank drawer is not an empty string — the surrounding
+// wrapper still emits ~50 characters of markup — so asserting non-emptiness
+// passes even when the drawer shows the user nothing.
+const COLLISION_PROBE = 'collision-probe-value'
+
 function renderCollidingKind(kind: string, apiVersion: string): string {
   return renderToString(
     <ResourceRendererDispatch
       resource={{ kind, namespace: 'default', name: 'thing' }}
-      data={{ apiVersion, kind: 'Cluster', metadata: { name: 'thing', namespace: 'default' }, spec: {}, status: {} }}
+      data={{
+        apiVersion,
+        kind: 'Cluster',
+        metadata: { name: 'thing', namespace: 'default' },
+        spec: { collisionProbe: COLLISION_PROBE },
+        status: {},
+      }}
       onCopy={() => {}}
       copied={null}
       showCommonSections={false}
@@ -237,8 +251,20 @@ describe('ResourceRendererDispatch — colliding plurals fall through', () => {
     ['imagecatalogs', 'other.io/v1'],
     ['clusterimagecatalogs', 'other.io/v1'],
     ['policies', 'operators.coreos.com/v1'],
+    // Velero's BackupRepository joined KNOWN_KINDS when it got a renderer, so
+    // it needs the same fall-through as its siblings.
+    ['backuprepositories', 'other.io/v1'],
   ])('renders something for a foreign %s CRD', (kind, apiVersion) => {
-    expect(renderCollidingKind(kind, apiVersion).trim()).not.toBe('')
+    expect(renderCollidingKind(kind, apiVersion)).toContain(COLLISION_PROBE)
+  })
+
+  // A Velero BackupRepository must reach its own renderer, not the generic one.
+  // It raises BackupRepositoryNotReady, and the reason Velero recorded is only
+  // on the dedicated page.
+  it('renders the Velero repository page for a velero.io backuprepositories', () => {
+    const html = renderCollidingKind('backuprepositories', 'velero.io/v1')
+    expect(html).toContain('Volume Namespace')
+    expect(html).not.toContain(COLLISION_PROBE)
   })
 
   // Both owners of `subscriptions` still get their own renderer.
@@ -254,6 +280,273 @@ describe('ResourceRendererDispatch — colliding plurals fall through', () => {
     expect(html).toContain('Cluster Overview')
     // The generic renderer's raw-spec dump must not appear alongside it.
     expect(html.match(/Cluster Overview/g)).toHaveLength(1)
+  })
+})
+
+describe('Calico IPPool collision handling', () => {
+  it.each(['crd.projectcalico.org/v1', 'projectcalico.org/v3'])('renders IPPool details for %s', (apiVersion) => {
+    const html = renderKind('ippools', {
+      apiVersion,
+      kind: 'IPPool',
+      metadata: { name: 'workloads' },
+      spec: {
+        allowedUses: ['Workload', 'Tunnel'],
+        assignmentMode: 'Automatic',
+        blockSize: 26,
+        cidr: '172.16.0.0/16',
+        ipipMode: 'CrossSubnet',
+        vxlanMode: 'Never',
+        natOutgoing: true,
+        disabled: false,
+        disableBGPExport: true,
+        nodeSelector: 'all()',
+        namespaceSelector: "environment == 'production'",
+      },
+    })
+
+    expect(html).toContain('IP Pool')
+    expect(html).toContain('Allowed Uses')
+    expect(html).toContain('Workload, Tunnel')
+    expect(html).toContain('Assignment Mode')
+    expect(html).toContain('Automatic')
+    expect(html).toContain('Block Size')
+    expect(html).toContain('26')
+    expect(html).toContain('CIDR')
+    expect(html).toContain('172.16.0.0/16')
+    expect(html).toContain('IP-in-IP Mode')
+    expect(html).toContain('CrossSubnet')
+    expect(html).toContain('VXLAN Mode')
+    expect(html).toContain('Never')
+    expect(html).toContain('NAT Outgoing')
+    expect(html).toContain('Yes')
+    expect(html).toContain('Disabled')
+    expect(html).toContain('No')
+    expect(html).toContain('BGP Export Disabled')
+    expect(html).toContain('Node Selector')
+    expect(html).toContain('all()')
+    expect(html).toContain('Namespace Selector')
+    expect(html).toContain('environment == &#x27;production&#x27;')
+  })
+
+  it('renders documented defaults when fields are omitted', () => {
+    const html = renderKind('ippools', {
+      apiVersion: 'projectcalico.org/v3',
+      kind: 'IPPool',
+      metadata: { name: 'default-ipv6' },
+      spec: { cidr: 'fd00::/48' },
+    })
+
+    expect(html).toContain('Workload, Tunnel')
+    expect(html).toContain('Automatic')
+    expect(html).toContain('122')
+    expect(html.match(/Never/g)).toHaveLength(2)
+    expect(html.match(/>No</g)).toHaveLength(3)
+    expect(html).toContain('all()')
+  })
+
+  it.each(['networking.example.io/v1', 'extension.projectcalico.org/v1'])('uses the generic renderer for %s', (apiVersion) => {
+    const html = renderKind('ippools', {
+      apiVersion,
+      kind: 'IPPool',
+      metadata: { name: 'foreign-pool' },
+      spec: { providerSpecificField: 'preserved' },
+    })
+
+    expect(html).toContain('Specification')
+    expect(html).toContain('Provider Specific Field')
+    expect(html).not.toContain('IP Pool')
+  })
+})
+
+describe('Calico HostEndpoint collision handling', () => {
+  it.each(['crd.projectcalico.org/v1', 'projectcalico.org/v3'])('renders HostEndpoint details for %s', (apiVersion) => {
+    const html = renderKind('hostendpoints', {
+      apiVersion,
+      kind: 'HostEndpoint',
+      metadata: { name: 'infra-1' },
+      spec: {
+        expectedIPs: ['172.20.16.133', '172.16.199.199'],
+        interfaceName: '*',
+        node: 'gdn-test-k8s-infra-1',
+        profiles: ['projectcalico-default-allow'],
+        ports: [{ name: 'ssh', protocol: 'TCP', port: 22 }],
+      },
+    }, '', () => {})
+
+    expect(html).toContain('Host Endpoint')
+    expect(html).toContain('Expected IPs')
+    expect(html).toContain('172.20.16.133')
+    expect(html).toContain('172.16.199.199')
+    expect(html).toContain('Interface Name')
+    expect(html).toContain('Node')
+    expect(html).toContain('<button')
+    expect(html).toContain('gdn-test-k8s-infra-1')
+    expect(html).toContain('Profiles')
+    expect(html).toContain('projectcalico-default-allow')
+    expect(html).toContain('Named Ports')
+    expect(html).toContain('ssh: TCP/22')
+  })
+
+  it.each(['networking.example.io/v1', 'extension.projectcalico.org/v1'])('uses the generic renderer for %s', (apiVersion) => {
+    const html = renderKind('hostendpoints', {
+      apiVersion,
+      kind: 'HostEndpoint',
+      metadata: { name: 'foreign-endpoint' },
+      spec: { providerSpecificField: 'preserved' },
+    })
+
+    expect(html).toContain('Specification')
+    expect(html).toContain('Provider Specific Field')
+    expect(html).not.toContain('Host Endpoint')
+  })
+})
+
+describe('Calico Tier collision handling', () => {
+  it.each(['crd.projectcalico.org/v1', 'projectcalico.org/v3'])('renders Tier details for %s', (apiVersion) => {
+    const html = renderKind('tiers', {
+      apiVersion,
+      kind: 'Tier',
+      metadata: { name: 'default' },
+      spec: { defaultAction: 'Deny', order: 1000000 },
+    })
+
+    expect(html).toContain('Tier')
+    expect(html).toContain('Default Action')
+    expect(html).toContain('Deny')
+    expect(html).toContain('Order')
+    expect(html).toContain('1000000')
+  })
+
+  it('renders documented defaults when fields are omitted', () => {
+    const html = renderKind('tiers', {
+      apiVersion: 'projectcalico.org/v3',
+      kind: 'Tier',
+      metadata: { name: 'default' },
+      spec: {},
+    })
+
+    expect(html).toContain('Deny')
+    expect(html).toContain('Last (lowest precedence)')
+  })
+
+  it.each(['networking.example.io/v1', 'extension.projectcalico.org/v1'])('uses the generic renderer for %s', (apiVersion) => {
+    const html = renderKind('tiers', {
+      apiVersion,
+      kind: 'Tier',
+      metadata: { name: 'foreign-tier' },
+      spec: { providerSpecificField: 'preserved' },
+    })
+
+    expect(html).toContain('Specification')
+    expect(html).toContain('Provider Specific Field')
+    expect(html).not.toContain('Default Action')
+  })
+})
+
+describe('Calico network policy collision handling', () => {
+  const calicoPolicies = [
+    ['NetworkPolicy', 'networkpolicies', 'CalicoNetworkPolicy'],
+    ['GlobalNetworkPolicy', 'globalnetworkpolicies', 'CalicoGlobalNetworkPolicy'],
+    ['StagedNetworkPolicy', 'stagednetworkpolicies', 'CalicoStagedNetworkPolicy'],
+    ['StagedGlobalNetworkPolicy', 'stagedglobalnetworkpolicies', 'CalicoStagedGlobalNetworkPolicy'],
+    ['StagedKubernetesNetworkPolicy', 'stagedkubernetesnetworkpolicies', 'CalicoStagedKubernetesNetworkPolicy'],
+  ] as const
+
+  it.each(calicoPolicies)('renders %s for both supported Calico groups', (kind, plural, label) => {
+    for (const apiVersion of ['crd.projectcalico.org/v1', 'projectcalico.org/v3']) {
+      const spec = kind === 'StagedKubernetesNetworkPolicy'
+        ? {
+            podSelector: { matchLabels: { app: 'api' } },
+            policyTypes: ['Ingress'],
+            stagedAction: 'Deny',
+            ingress: [{ from: [{ ipBlock: { cidr: '10.0.0.0/8' } }] }],
+          }
+        : {
+            selector: "app == 'api'",
+            tier: 'security',
+            order: 100,
+            types: ['Ingress'],
+            stagedAction: 'Deny',
+            ingress: [{ action: 'Log', protocol: 'TCP', source: { nets: ['10.0.0.0/8'] } }],
+          }
+      const html = renderKind(plural, {
+        apiVersion,
+        kind,
+        metadata: { name: 'policy', namespace: 'default' },
+        spec,
+      }, 'default')
+
+      if (kind === 'StagedKubernetesNetworkPolicy') {
+        expect(html).toContain('Target')
+        expect(html).toContain('Ingress Rules')
+        expect(html).toContain('Pod Selector')
+        expect(html).toContain('Staged preview')
+        expect(html).toContain('Dashed paths are evaluated but not enforced')
+        expect(html).toContain('stroke-dasharray="4 3"')
+        expect(html).not.toContain('CalicoStagedKubernetesNetworkPolicy')
+        expect(html).not.toContain('Allow')
+      } else {
+        expect(html).toContain(label)
+        expect(html).toContain('security')
+        expect(html).toContain('Log')
+      }
+      expect(html).toContain('10.0.0.0/8')
+      if (kind.startsWith('Staged') && kind !== 'StagedKubernetesNetworkPolicy') expect(html).toContain('Deny')
+    }
+  })
+
+  it('keeps core networking.k8s.io NetworkPolicy on the core renderer', () => {
+    const html = renderKind('networkpolicies', {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: { name: 'core', namespace: 'default' },
+      spec: { podSelector: {}, policyTypes: ['Ingress'], ingress: [] },
+    }, 'default')
+
+    expect(html).toContain('Pod Selector')
+    expect(html).toContain('Deny all ingress')
+    expect(html).not.toContain('Calico NetworkPolicy')
+  })
+
+  it('uses the native staged Kubernetes presentation without an Allow action', () => {
+    const html = renderKind('stagedkubernetesnetworkpolicies', {
+      apiVersion: 'projectcalico.org/v3',
+      kind: 'StagedKubernetesNetworkPolicy',
+      metadata: { name: 'staged', namespace: 'default' },
+      spec: {
+        podSelector: { matchLabels: { app: 'api' } },
+        policyTypes: ['Ingress'],
+        ingress: [{}],
+      },
+    }, 'default')
+
+    expect(html).toContain('Target')
+    expect(html).toContain('Ingress Rules')
+    expect(html).toContain('All sources')
+    expect(html).toContain('Staged preview')
+    expect(html).toContain('Dashed paths are evaluated but not enforced')
+    expect(html).toContain('stroke-dasharray="4 3"')
+    expect(html).not.toContain('Allow')
+  })
+
+  it.each([
+    ['networkpolicies', 'other.example.io/v1', 'NetworkPolicy'],
+    ['networkpolicies', 'extension.projectcalico.org/v1', 'NetworkPolicy'],
+    ['globalnetworkpolicies', 'other.example.io/v1', 'GlobalNetworkPolicy'],
+    ['stagednetworkpolicies', 'other.example.io/v1', 'StagedNetworkPolicy'],
+    ['stagedglobalnetworkpolicies', 'other.example.io/v1', 'StagedGlobalNetworkPolicy'],
+    ['stagedkubernetesnetworkpolicies', 'other.example.io/v1', 'StagedKubernetesNetworkPolicy'],
+  ])('uses GenericRenderer for foreign %s/%s', (plural, apiVersion, kind) => {
+    const html = renderKind(plural, {
+      apiVersion,
+      kind,
+      metadata: { name: 'foreign', namespace: 'default' },
+      spec: { providerSpecificField: 'preserved' },
+    }, 'default')
+
+    expect(html).toContain('Specification')
+    expect(html).toContain('Provider Specific Field')
+    expect(html).not.toContain('Calico')
   })
 })
 
@@ -319,5 +612,31 @@ describe('shared plurals — the status path collides too', () => {
       status: { phase: 'Installed' },
     })
     expect(foreign?.text).toBe('Installed')
+  })
+})
+
+// A BackupRepository has custom table columns and raises its own issue, but no
+// detail renderer — so it renders generically. Its status still has to resolve
+// through the Velero mapping, or the drawer header prints the raw phase next to
+// a table cell showing the human label for the same object.
+describe('Velero BackupRepository status', () => {
+  const repo = (phase: string) => ({
+    apiVersion: 'velero.io/v1',
+    kind: 'BackupRepository',
+    metadata: { name: 'r', namespace: 'velero' },
+    spec: { repositoryType: 'kopia' },
+    status: { phase },
+  })
+
+  it('resolves through the Velero mapping, not the raw phase', () => {
+    expect(getResourceStatus('backuprepositories', repo('NotReady'))?.text).toBe('Not ready')
+    expect(getResourceStatus('backuprepositories', repo('Ready'))?.text).toBe('Ready')
+  })
+
+  // The plural is not Velero's alone; another group's repository must not pick
+  // up Velero's mapping.
+  it('leaves a foreign backuprepositories kind alone', () => {
+    const foreign = { ...repo('NotReady'), apiVersion: 'example.com/v1' }
+    expect(getResourceStatus('backuprepositories', foreign)?.text).not.toBe('Not ready')
   })
 })

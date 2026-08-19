@@ -33,6 +33,9 @@ type veleroObj struct {
 	message        string
 	errors         int64
 	paused         bool
+	// itemOperationTimeout is the budget the backup declares. Empty means the
+	// object carries none, which is the shape most real backups have.
+	itemOperationTimeout string
 }
 
 func (o veleroObj) build(kind string) *unstructured.Unstructured {
@@ -77,6 +80,9 @@ func (o veleroObj) build(kind string) *unstructured.Unstructured {
 	spec := map[string]any{}
 	if o.paused {
 		spec["paused"] = true
+	}
+	if o.itemOperationTimeout != "" {
+		spec["itemOperationTimeout"] = o.itemOperationTimeout
 	}
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "velero.io/v1",

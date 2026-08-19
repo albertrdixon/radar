@@ -1,12 +1,11 @@
 import { useMemo } from 'react'
 import type { Topology } from '../../types'
-import type { DashboardTopologySummary } from '../../api/client'
 import { Network, ArrowRight } from 'lucide-react'
 import { clsx } from 'clsx'
 
 interface TopologyPreviewProps {
   topology: Topology | null
-  summary: DashboardTopologySummary
+  namespaceSelected: boolean
   onNavigate: () => void
 }
 
@@ -133,8 +132,29 @@ const kindDotColors: Record<string, string> = {
   ReplicaSet: 'bg-green-400', HPA: 'bg-pink-500', PVC: 'bg-cyan-400',
 }
 
-export function TopologyPreview({ topology, summary, onNavigate }: TopologyPreviewProps) {
+export function TopologyPreview({ topology, namespaceSelected, onNavigate }: TopologyPreviewProps) {
   const stats = useTopologyStats(topology)
+
+  // A large cluster with no namespace filter gets an empty graph carrying this
+  // flag instead of a build. There is no graph to preview and there never will
+  // be until the user filters, so the card says that rather than counting a
+  // refusal as zero.
+  //
+  // With a pick already active the same flag means something else entirely: SSE
+  // only learns to filter server-side after a flagged frame arrives, so a
+  // cluster-wide refusal still reaches a viewer whose namespace is on its way
+  // to the server. That resolves on its own, and asking for what the viewer
+  // already chose is the wrong thing to say while it does.
+  const needsNamespaceFilter = topology?.requiresNamespaceFilter === true && !namespaceSelected
+
+  // The graph this card draws is the only source for its caption. Node count is
+  // not the test for whether a frame counts — the stream holds topology at null
+  // until one lands and resets it there on reconnect and context switch, so a
+  // delivered graph with no nodes is an empty scope and an honest zero.
+  const counts = useMemo(() => {
+    if (!topology || topology.requiresNamespaceFilter) return null
+    return { nodeCount: topology.nodes.length, edgeCount: topology.edges.length }
+  }, [topology])
 
   return (
     <button
@@ -147,13 +167,27 @@ export function TopologyPreview({ topology, summary, onNavigate }: TopologyPrevi
           <Network className="w-4 h-4 text-theme-text-tertiary" />
           <span className="text-xs font-semibold uppercase tracking-wider text-theme-text-secondary">Topology</span>
         </div>
-        <span className="text-[11px] text-theme-text-tertiary">
-          {summary.nodeCount} resources &middot; {summary.edgeCount} conn
-        </span>
+        {counts ? (
+          <span className="text-[11px] text-theme-text-tertiary">
+            {counts.nodeCount} resources &middot; {counts.edgeCount} conn
+          </span>
+        ) : needsNamespaceFilter ? null : (
+          <span className="h-3 w-28 rounded bg-theme-text-tertiary/20 animate-pulse" />
+        )}
       </div>
 
       {/* Stats (left) + Schematic (right) */}
       <div className="flex-1 flex items-stretch min-h-0 px-3 py-1.5 gap-2">
+        {needsNamespaceFilter ? (
+          <div className="flex-1 flex items-center justify-center px-4">
+            <p className="text-[11px] leading-relaxed text-theme-text-tertiary text-center">
+              This cluster is too large to graph every namespace.
+              <br />
+              <span className="text-theme-text-secondary font-medium">Select a namespace</span> to view the topology.
+            </p>
+          </div>
+        ) : (
+          <>
         {/* Left: compact stats */}
         <div className="flex flex-col justify-center gap-0.5 min-w-0 w-[105px] shrink-0">
           {stats ? (
@@ -187,16 +221,26 @@ export function TopologyPreview({ topology, summary, onNavigate }: TopologyPrevi
               )}
             </>
           ) : (
-            // Show summary-based placeholder while full topology loads via SSE
+            // No graph yet, or one with nothing in scope. Until a frame lands
+            // there is no honest number here — a zero would read as an empty
+            // cluster, so pulse instead.
             <div className="flex flex-col gap-0.5">
               <div className="flex items-center gap-1.5 text-[10px] leading-tight">
-                <span className="w-1.5 h-1.5 rounded-full bg-blue-400 shrink-0" />
-                <span className="text-theme-text-primary font-medium w-5 text-right tabular-nums">{summary.nodeCount}</span>
+                <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', counts ? 'bg-blue-400' : 'bg-theme-text-tertiary/30 animate-pulse')} />
+                {counts ? (
+                  <span className="text-theme-text-primary font-medium w-5 text-right tabular-nums">{counts.nodeCount}</span>
+                ) : (
+                  <span className="h-3 w-5 rounded bg-theme-text-tertiary/20 animate-pulse" />
+                )}
                 <span className="text-theme-text-tertiary">resources</span>
               </div>
               <div className="flex items-center gap-1.5 text-[10px] leading-tight">
-                <span className="w-1.5 h-1.5 rounded-full bg-theme-text-tertiary shrink-0" />
-                <span className="text-theme-text-primary font-medium w-5 text-right tabular-nums">{summary.edgeCount}</span>
+                <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', counts ? 'bg-theme-text-tertiary' : 'bg-theme-text-tertiary/30 animate-pulse')} />
+                {counts ? (
+                  <span className="text-theme-text-primary font-medium w-5 text-right tabular-nums">{counts.edgeCount}</span>
+                ) : (
+                  <span className="h-3 w-5 rounded bg-theme-text-tertiary/10 animate-pulse" />
+                )}
                 <span className="text-theme-text-tertiary">connections</span>
               </div>
             </div>
@@ -207,6 +251,8 @@ export function TopologyPreview({ topology, summary, onNavigate }: TopologyPrevi
         <div className="flex-1 flex items-center min-w-0">
           <TopologySchematic />
         </div>
+          </>
+        )}
       </div>
 
       <div className="px-4 py-1.5 border-t border-theme-border/50 flex items-center justify-end gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-theme-text-secondary group-hover:text-theme-text-primary transition-colors">

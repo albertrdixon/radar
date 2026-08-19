@@ -41,6 +41,10 @@ var (
 	testServerSrv *Server
 )
 
+// testFakeClient is the shared cluster fixture built in TestMain. Tests that
+// replace the resource cache restore it from here.
+var testFakeClient *fake.Clientset
+
 func TestMain(m *testing.M) {
 	// The Cloud-funnel rollout gate mints an install ID in ~/.radar on first
 	// use; redirect HOME so no test run touches the developer's real settings.
@@ -56,7 +60,9 @@ func TestMain(m *testing.M) {
 	deployUID := "deploy-uid-1234"
 	rsUID := "rs-uid-5678"
 
-	fakeClient := fake.NewClientset(
+	// Package-level so tests that swap in their own cluster shape (census-scale
+	// measurements) can restore the shared fixture the rest of the suite reads.
+	testFakeClient = fake.NewClientset(
 		&corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{Name: "default"},
 			Status:     corev1.NamespaceStatus{Phase: corev1.NamespaceActive},
@@ -344,7 +350,7 @@ func TestMain(m *testing.M) {
 	)
 
 	// Initialize cache from fake client (bypasses RBAC checks)
-	if err := k8s.InitTestResourceCache(fakeClient); err != nil {
+	if err := k8s.InitTestResourceCache(testFakeClient); err != nil {
 		panic("InitTestResourceCache: " + err.Error())
 	}
 

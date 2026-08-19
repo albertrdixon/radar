@@ -83,3 +83,36 @@ describe('the WAL banner must not claim nothing else looks wrong when something 
     expect(html(walFailing(phase, 2))).not.toContain(CLAIM)
   })
 })
+
+describe('recovery points must be readable as ages, not raw machine timestamps', () => {
+  const withBackup = (lastSuccessful: string) => ({
+    apiVersion: 'postgresql.cnpg.io/v1',
+    kind: 'Cluster',
+    metadata: { name: 'pg', namespace: 'db' },
+    spec: { instances: 2, backup: { barmanObjectStore: { destinationPath: 's3://bucket' } } },
+    status: {
+      phase: 'Cluster in healthy state',
+      readyInstances: 2,
+      lastSuccessfulBackup: lastSuccessful,
+      firstRecoverabilityPoint: lastSuccessful,
+    },
+  })
+
+  it('states how old the last successful backup is', () => {
+    const old = new Date(Date.now() - 200 * 24 * 60 * 60 * 1000).toISOString()
+    const html = renderToString(<CNPGClusterRenderer data={withBackup(old)} />)
+    // The age is the whole point: a raw ISO string requires the reader to do
+    // date arithmetic to notice their newest backup is 200 days old.
+    expect(html).toContain('200d ago')
+    // And the ISO form with its milliseconds must not survive as the display value.
+    expect(html).not.toContain(old)
+  })
+
+  it('keeps the absolute timestamp beside the age', () => {
+    // Age alone is the wrong unit here: "1d ago" next to "1d ago" is the same
+    // string for events a week apart in a failure history.
+    const at = '2026-01-30T09:40:37.000Z'
+    const html = renderToString(<CNPGClusterRenderer data={withBackup(at)} />)
+    expect(html).toContain('2026-01-30 09:40:37 UTC')
+  })
+})

@@ -1,0 +1,74 @@
+# Backups that completed successfully into a storage location that is now
+# Unavailable.
+#
+# This is the state a phase alone cannot describe. Both of these say Completed —
+# they did complete, and the record is accurate — but dr-replica is Unavailable,
+# so right now there is nothing to restore them from. A screen that reads the
+# phase and stops calls this a healthy pair of backups.
+#
+# Two of them, not one, so the location's summary has a plural to get right.
+---
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: dr-nightly-recent
+  namespace: velero
+spec:
+  includedNamespaces:
+    - "*"
+  storageLocation: dr-replica
+  ttl: 720h0m0s
+status:
+  completionTimestamp: "@now-2920m"
+  expiration: "@now+40280m"
+  phase: Completed
+  progress:
+    itemsBackedUp: 512
+    totalItems: 512
+  startTimestamp: "@now-2926m"
+---
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: dr-nightly-older
+  namespace: velero
+spec:
+  includedNamespaces:
+    - "*"
+  storageLocation: dr-replica
+  ttl: 720h0m0s
+status:
+  completionTimestamp: "@now-4360m"
+  expiration: "@now+38840m"
+  phase: Completed
+  progress:
+    itemsBackedUp: 508
+    totalItems: 508
+  startTimestamp: "@now-4366m"
+---
+# A backup that completed and has since passed its retention.
+#
+# Velero's garbage collector deletes these, so one still listed means either the
+# collector has not got to it or — as on this cluster — the controller is not
+# running to collect anything. The phase still reads Completed, and the data is
+# still in the bucket: Velero's restore controller does not check expiration, so
+# a restore from it would work right up until the collector removes it. What
+# Radar says is that Velero intends to delete it, not that it has.
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: dr-nightly-expired
+  namespace: velero
+spec:
+  includedNamespaces:
+    - "*"
+  storageLocation: dr-replica
+  ttl: 24h0m0s
+status:
+  completionTimestamp: "@now-5800m"
+  expiration: "@now-4360m"
+  phase: Completed
+  progress:
+    itemsBackedUp: 500
+    totalItems: 500
+  startTimestamp: "@now-5806m"

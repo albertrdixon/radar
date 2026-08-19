@@ -1,5 +1,5 @@
 import { ArchiveRestore, Filter } from 'lucide-react'
-import { Section, PropertyList, Property, ConditionsSection, AlertBanner } from '../../ui/drawer-components'
+import { Section, PropertyList, Property, ConditionsSection, AlertBanner, ResourceLink } from '../../ui/drawer-components'
 import {
   getRestoreStatus,
   getRestoreBackupName,
@@ -17,13 +17,20 @@ import {
   isBackupPartialFailurePhase,
 } from '../resource-utils-velero'
 import { VeleroPhaseValue } from './velero-cells'
+import { veleroPhaseLabel } from '../resource-utils-velero'
 import { formatAge } from '../resource-utils'
+import { VeleroRunMessages, type VeleroRunMessagesFetch } from './VeleroRunMessages'
 
 interface VeleroRestoreRendererProps {
   data: any
+  /** Wired by the host, which owns the fetch. Optional: a consumer that does
+   *  not wire it gets the counts on their own, with no button. */
+  messages?: VeleroRunMessagesFetch
+  /** The backup a restore came from is the one thing every reader wants next. */
+  onNavigate?: (ref: { kind: string; namespace: string; name: string; group?: string }) => void
 }
 
-export function VeleroRestoreRenderer({ data }: VeleroRestoreRendererProps) {
+export function VeleroRestoreRenderer({ data, messages, onNavigate }: VeleroRestoreRendererProps) {
   const status = data.status || {}
   const conditions = status.conditions || []
 
@@ -79,7 +86,9 @@ export function VeleroRestoreRenderer({ data }: VeleroRestoreRendererProps) {
         <AlertBanner
           variant="warning"
           title={`${warnings} Warning(s)`}
-          message={`Restore completed with ${warnings} warning(s).`}
+          message={phase === 'Completed'
+            ? `This restore completed, with ${warnings} warning(s).`
+            : `This restore has reported ${warnings} warning(s) so far. It is ${veleroPhaseLabel(phase).toLowerCase()}, so this is not a final count.`}
         />
       )}
 
@@ -89,7 +98,15 @@ export function VeleroRestoreRenderer({ data }: VeleroRestoreRendererProps) {
           <Property label="Phase" value={
             <VeleroPhaseValue status={restoreStatus} phase={phase} />
           } />
-          <Property label="Backup" value={getRestoreBackupName(data)} />
+          <Property label="Backup" value={
+            <ResourceLink
+              name={getRestoreBackupName(data)}
+              kind="Backup"
+              namespace={data?.metadata?.namespace ?? ''}
+              group="velero.io"
+              onNavigate={onNavigate}
+            />
+          } />
           {status.startTimestamp && (
             <Property label="Started" value={formatAge(status.startTimestamp) + ' ago'} />
           )}
@@ -108,6 +125,7 @@ export function VeleroRestoreRenderer({ data }: VeleroRestoreRendererProps) {
               : '0'
           } />
         </PropertyList>
+        {messages && <VeleroRunMessages {...messages} errors={errors} warnings={warnings} />}
       </Section>
 
       {/* Progress section (if in progress) */}

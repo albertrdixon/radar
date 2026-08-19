@@ -74,6 +74,17 @@ func (m *mockProvider) GetResourceStatus(kind, namespace, name string) *Resource
 	return nil
 }
 
+// relationshipCacheOptions mirrors what the SSE broadcaster asks for when it
+// refreshes the relationship cache: every namespace, ReplicaSets included, and
+// ForRelationshipCache set — which is what waives the large-cluster guard.
+func relationshipCacheOptions() BuildOptions {
+	opts := DefaultBuildOptions()
+	opts.ViewMode = ViewModeResources
+	opts.IncludeReplicaSets = true
+	opts.ForRelationshipCache = true
+	return opts
+}
+
 type rolloutDynamicProvider struct {
 	gvr                 schema.GroupVersionResource
 	rollouts            []*unstructured.Unstructured

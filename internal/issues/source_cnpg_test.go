@@ -3,6 +3,7 @@ package issues
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/skyhook-io/radar/pkg/issuesapi"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -597,5 +598,73 @@ func TestCNPGDeclarativeNotApplied(t *testing.T) {
 		if !strings.Contains(out[0].Message, "gave no reason") {
 			t.Errorf("%s with no operator message should say so: %q", kind, out[0].Message)
 		}
+	}
+}
+
+var cnpgScheduledBackupGVR = schema.GroupVersionResource{Group: "postgresql.cnpg.io", Version: "v1", Resource: "scheduledbackups"}
+
+func cnpgScheduledBackup(suspend bool, nextScheduleTime string) *unstructured.Unstructured {
+	spec := map[string]any{"schedule": "0 0 0 * * *", "suspend": suspend}
+	status := map[string]any{}
+	if nextScheduleTime != "" {
+		status["nextScheduleTime"] = nextScheduleTime
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "postgresql.cnpg.io/v1",
+		"kind":       "ScheduledBackup",
+		"metadata":   map[string]any{"name": "nightly", "namespace": "pg"},
+		"spec":       spec,
+		"status":     status,
+	}}
+}
+
+// A schedule that stops firing is the one backup failure with nothing else to
+// see: no condition goes False, no object reports an error, and the cluster
+// stays green while its recovery point ages.
+func TestCNPGScheduledBackupMissed(t *testing.T) {
+	rfc := func(d time.Duration) string { return time.Now().Add(d).Format(time.RFC3339) }
+
+	tests := []struct {
+		name    string
+		obj     *unstructured.Unstructured
+		wantHit bool
+	}{
+		{"due 200 days ago and nothing ran", cnpgScheduledBackup(false, rfc(-200*24*time.Hour)), true},
+		{"due just past the grace window", cnpgScheduledBackup(false, rfc(-cnpgScheduledBackupGrace-time.Minute)), true},
+		// The operator has simply not picked it up yet. Firing here would raise an
+		// issue on every healthy schedule for the seconds around each run.
+		{"due moments ago, inside the grace window", cnpgScheduledBackup(false, rfc(-time.Minute)), false},
+		{"not due yet", cnpgScheduledBackup(false, rfc(time.Hour)), false},
+		// Suspended stops the operator maintaining the field, so the stored value
+		// goes stale at once and would report every paused schedule as missed.
+		{"suspended long past its last next-run time", cnpgScheduledBackup(true, rfc(-200*24*time.Hour)), false},
+		{"operator has not published a next run", cnpgScheduledBackup(false, ""), false},
+		{"unparseable next run", cnpgScheduledBackup(false, "not-a-timestamp"), false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := detectCNPGIssues(cnpgScheduledBackupGVR, "ScheduledBackup", tc.obj)
+			if tc.wantHit {
+				iss := findIssue(t, got, "CNPGScheduledBackupMissed")
+				if iss.Severity != SeverityWarning {
+					t.Errorf("severity = %v, want warning", iss.Severity)
+				}
+				// It must file as a backup problem, or the backup filter answers a
+				// different question than it claims to. Classified through the
+				// production path so the test cannot drift from how rows are
+				// actually labelled.
+				classifyIssue(&iss)
+				if iss.Category != issuesapi.CategoryBackupFailed {
+					t.Errorf("category = %v, want backup_failed", iss.Category)
+				}
+				return
+			}
+			for _, i := range got {
+				if i.Reason == "CNPGScheduledBackupMissed" {
+					t.Fatalf("unexpected missed-backup issue: %s", i.Message)
+				}
+			}
+		})
 	}
 }

@@ -763,11 +763,46 @@ export function getCNPGBackupTarget(resource: any): string {
 // CNPG SCHEDULED BACKUP UTILITIES
 // ============================================================================
 
+/**
+ * Reconcile latency between a backup coming due and the operator starting it.
+ * Not a backup policy — nothing here decides how often backups should run.
+ * Kept in step with the detector that raises the matching issue.
+ */
+const CNPG_SCHEDULED_BACKUP_GRACE_MS = 10 * 60 * 1000
+
+/**
+ * How far past its own next-run time this schedule is, or null when it is not
+ * meaningfully overdue.
+ *
+ * The expectation belongs to the operator: CNPG publishes `nextScheduleTime`
+ * and updates it whenever it runs a backup. A value still in the past therefore
+ * means no backup happened. Suspended schedules are excluded because the
+ * operator stops maintaining the field, so the stale value would read as missed
+ * on every deliberately paused schedule.
+ */
+export function getCNPGScheduledBackupOverdueMs(resource: any): number | null {
+  if (resource?.spec?.suspend === true) return null
+  const next = resource?.status?.nextScheduleTime
+  if (!next) return null
+  const dueAt = new Date(next).getTime()
+  if (Number.isNaN(dueAt)) return null
+  const overdue = Date.now() - dueAt
+  return overdue > CNPG_SCHEDULED_BACKUP_GRACE_MS ? overdue : null
+}
+
 export function getCNPGScheduledBackupStatus(resource: any): StatusBadge {
   const isSuspended = resource.spec?.suspend === true
 
   if (isSuspended) {
     return { text: 'Suspended', color: healthColors.neutral, level: 'neutral' }
+  }
+
+  // The operator said when the next backup was due and it has not happened.
+  // Checked before lastScheduleTime: a schedule that ran once and then stopped
+  // has both, and reporting it healthy contradicted the next-run figure sitting
+  // on the same row.
+  if (getCNPGScheduledBackupOverdueMs(resource) !== null) {
+    return { text: 'Overdue', color: healthColors.degraded, level: 'degraded' }
   }
 
   // If we have a last schedule time, it's active
@@ -802,10 +837,20 @@ export function getCNPGScheduledBackupLastSchedule(resource: any): string {
 export function getCNPGScheduledBackupNextSchedule(resource: any): string {
   const next = resource.status?.nextScheduleTime
   if (!next) return '-'
+  // A suspended schedule keeps whatever next-run time it had when it was
+  // paused, and the operator stops maintaining it. Counting down to it, or
+  // calling it due, would both describe a run that is not coming.
+  if (resource.spec?.suspend === true) return 'suspended'
   const nextDate = new Date(next)
   const now = new Date()
   const diffMs = nextDate.getTime() - now.getTime()
-  if (diffMs <= 0) return 'overdue'
+  // Past due, but inside the window where the operator has simply not picked it
+  // up yet. Calling that "overdue" while the badge still reads healthy is the
+  // contradiction this pair is meant to avoid.
+  if (diffMs <= 0) {
+    const overdue = getCNPGScheduledBackupOverdueMs(resource)
+    return overdue === null ? 'due now' : `overdue by ${formatDuration(overdue)}`
+  }
   return `in ${formatDuration(diffMs)}`
 }
 

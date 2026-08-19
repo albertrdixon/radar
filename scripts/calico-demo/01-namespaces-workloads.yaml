@@ -1,0 +1,146 @@
+# Namespaces carry labels so a global policy's namespaceSelector has something
+# real to select on, and the workloads carry the label shapes the Calico
+# selector grammar needs: equality, set membership, and a bare has().
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: calico-demo
+  labels:
+    env: prod
+    team: payments
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: calico-demo-dev
+  labels:
+    env: dev
+---
+# Labelled so a serviceAccountSelector has something to match. Calico adds
+# projectcalico.org/name and kubernetes.io/service-account.name itself.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: api-sa
+  namespace: calico-demo
+  labels:
+    team: payments
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: calico-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: web }
+  template:
+    metadata:
+      labels: { app: web, tier: frontend, role: edge }
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          resources: { requests: { cpu: 10m, memory: 16Mi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: calico-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: api }
+  template:
+    metadata:
+      labels: { app: api, tier: backend }
+    spec:
+      serviceAccountName: api-sa
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          resources: { requests: { cpu: 10m, memory: 16Mi } }
+---
+# Deliberately selected by no enforced policy, so "uncovered" is a real state
+# on the dashboard rather than something you have to construct by hand.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: db
+  namespace: calico-demo
+spec:
+  serviceName: db
+  replicas: 1
+  selector:
+    matchLabels: { app: db }
+  template:
+    metadata:
+      labels: { app: db, tier: data }
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          resources: { requests: { cpu: 10m, memory: 16Mi } }
+---
+# Selected only by a staged policy, so the "covered if staged" projection has
+# exactly one workload to account for.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: agent
+  namespace: calico-demo
+spec:
+  selector:
+    matchLabels: { app: agent }
+  template:
+    metadata:
+      labels: { app: agent, tier: infra }
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          resources: { requests: { cpu: 10m, memory: 16Mi } }
+---
+# Same labels as calico-demo/web but in a namespace the prod namespaceSelector
+# excludes. A namespaceSelector that is silently ignored shows up here as
+# coverage this workload should not have.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dev-web
+  namespace: calico-demo-dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: web }
+  template:
+    metadata:
+      labels: { app: web, tier: frontend }
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          resources: { requests: { cpu: 10m, memory: 16Mi } }
+---
+# A core Kubernetes NetworkPolicy living alongside the Calico ones. Calico's
+# NetworkPolicy is a different kind in a different group that happens to share
+# the name; anything that merges the two families is wrong, and this is what
+# catches it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: core-web-ingress
+  namespace: calico-demo
+spec:
+  podSelector:
+    matchLabels: { app: web }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: api }
+      ports:
+        - protocol: TCP
+          port: 80

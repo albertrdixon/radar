@@ -2,7 +2,7 @@ import { Archive, Clock, HardDrive } from 'lucide-react'
 import { clsx } from 'clsx'
 import { Section, PropertyList, Property, AlertBanner, ResourceLink } from '../../ui/drawer-components'
 import { HEALTH_BADGE_COLORS } from '../../../utils/badge-colors'
-import { formatAge } from '../resource-utils'
+import { RecoveryTime } from './CNPGShared'
 import {
   getCNPGObjectStoreProvider,
   getCNPGObjectStoreCredentialSecret,
@@ -21,25 +21,6 @@ import {
  * own. Until this renderer existed that sentence pointed at a page showing raw
  * fields, so the restorable range was effectively unreachable in the product.
  */
-/**
- * A recovery point, stated absolutely with the interval beside it.
- *
- * "1d ago" is the wrong unit for this question. An RPO conversation needs a
- * timestamp — and "Last Successful Backup 1d ago" next to "Last Failed Attempt
- * 1d ago" is the same string for events a week apart in the failure history,
- * which is precisely when you are reading this screen. Same treatment the
- * certificate rows already use.
- */
-function RecoveryTime({ at }: { at: string }) {
-  const d = new Date(at)
-  if (Number.isNaN(d.getTime())) return <>{at}</>
-  return (
-    <span className="inline-flex items-baseline gap-2 min-w-0">
-      <span>{d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC')}</span>
-      <span className="text-xs text-theme-text-tertiary shrink-0">{formatAge(at)} ago</span>
-    </span>
-  )
-}
 
 export function CNPGObjectStoreRenderer({
   data,

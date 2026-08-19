@@ -1,0 +1,75 @@
+# In-cluster S3, so Velero has somewhere real to write.
+#
+# This is what separates `live` from `up`. Without object storage a running
+# Velero controller has exactly one outcome available to it — every backup fails
+# on credentials — which is why the default mode freezes the controller and
+# hand-writes status instead. With a bucket, the controller produces the phases
+# itself: a Completed backup is one Velero actually wrote and can read back, and
+# an Unavailable location is one whose storage genuinely stopped answering.
+#
+# Single replica, no persistence. The bucket exists for as long as the demo does;
+# losing it on a pod restart is the correct amount of durability for a fixture.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: minio
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-creds
+  namespace: minio
+stringData:
+  # Also consumed by Velero, via the cloud-credentials secret the script writes.
+  root-user: minioadmin
+  root-password: minioadmin
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: minio
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: minio }
+  template:
+    metadata:
+      labels: { app: minio }
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:RELEASE.2024-09-22T00-33-43Z
+          args: ["server", "/data", "--console-address", ":9001"]
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: minio-creds, key: root-user } }
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: minio-creds, key: root-password } }
+          ports:
+            - { containerPort: 9000, name: s3 }
+            - { containerPort: 9001, name: console }
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: 9000 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: minio
+spec:
+  # NodePort, not ClusterIP: the kind cluster maps host port 30900 here so that
+  # the pre-signed download URLs Velero hands out (signed for
+  # http://localhost:30900 via the location's publicUrl) resolve to this MinIO
+  # from outside the cluster. See scripts/velero-demo/cluster/kind-cluster.yaml.
+  type: NodePort
+  selector: { app: minio }
+  ports:
+    - { name: s3, port: 9000, targetPort: 9000, nodePort: 30900 }

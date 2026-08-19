@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/skyhook-io/radar/internal/desktopenv"
 	"github.com/skyhook-io/radar/internal/errorlog"
 	"github.com/skyhook-io/radar/internal/k8s"
 	prometheuspkg "github.com/skyhook-io/radar/internal/prometheus"
@@ -56,6 +57,7 @@ type DiagnosticsSnapshot struct {
 	APIDiscovery        *DiagAPIDiscovery            `json:"apiDiscovery,omitempty"`
 	SSE                 *DiagSSE                     `json:"sse,omitempty"`
 	Perf                *perfstats.Snapshot          `json:"perf,omitempty"`
+	Desktop             *desktopenv.Snapshot         `json:"desktop,omitempty"`
 	Runtime             *DiagRuntime                 `json:"runtime,omitempty"`
 	Config              *DiagConfig                  `json:"config,omitempty"`
 	RecentErrors        []errorlog.ErrorEntry        `json:"recentErrors,omitempty"`
@@ -494,6 +496,16 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	collectSafe("perf", &errs, func() {
 		perf := perfstats.GetSnapshot()
 		snap.Perf = &perf
+	})
+
+	// Desktop host environment — the display server and WebKit render
+	// overrides decide whether the webview renders at all, and the CLI shares
+	// this endpoint, so gate on actually being the desktop app.
+	collectSafe("desktop", &errs, func() {
+		if !version.IsDesktop() {
+			return
+		}
+		snap.Desktop = desktopenv.Collect()
 	})
 
 	// Runtime

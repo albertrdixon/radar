@@ -46,6 +46,12 @@ var cnpgTerminalPhases = map[string]bool{
 // as "mid-operation" before the generic detector is allowed to report it.
 const cnpgTransientConditionGrace = 30 * time.Minute
 
+// cnpgScheduledBackupGrace absorbs the gap between the moment a backup comes due
+// and the moment the operator gets round to starting it. It is reconcile
+// latency, not a backup policy: nothing here decides how often backups should
+// run, only that the schedule missed a time it set for itself.
+const cnpgScheduledBackupGrace = 10 * time.Minute
+
 // cnpgAttentionPhases are stalled waiting on a human. Under
 // primaryUpdateStrategy: supervised this is the documented resting state, so it
 // only raises an issue under an unsupervised strategy.
@@ -127,8 +133,53 @@ func detectCNPGIssues(gvr schema.GroupVersionResource, kind string, u *unstructu
 		return detectCNPGBackupIssues(gvr, kind, u)
 	case "Database", "Publication", "Subscription":
 		return detectCNPGDeclarativeIssues(gvr, kind, u)
+	case "ScheduledBackup":
+		return detectCNPGScheduledBackupIssues(gvr, kind, u)
 	}
 	return nil
+}
+
+// The operator publishes when it expects the next backup to run. Once that
+// moment has passed and no backup has happened, backups have stopped.
+//
+// This is the one backup failure with nothing else to see: every other detector
+// here fires on something the operator reported as failed. A schedule that
+// simply stops firing reports nothing, so the cluster stays green while its
+// recovery point ages. The last-backup timestamp is the only evidence, and
+// until now nothing compared it to the present.
+//
+// The expectation is the operator's, not ours. We never decide how often a
+// backup should run — that is the cluster owner's policy. We only report that
+// the schedule missed the time it set for itself.
+func detectCNPGScheduledBackupIssues(gvr schema.GroupVersionResource, kind string, u *unstructured.Unstructured) []Issue {
+	// Suspended is a deliberate state. The operator stops updating
+	// nextScheduleTime, so the stored value goes stale immediately and reporting
+	// it as missed would fire on every intentionally paused schedule.
+	if suspended, found, err := unstructured.NestedBool(u.Object, "spec", "suspend"); err == nil && found && suspended {
+		return nil
+	}
+
+	next, found, err := unstructured.NestedString(u.Object, "status", "nextScheduleTime")
+	if err != nil || !found || next == "" {
+		return nil
+	}
+	due, err := time.Parse(time.RFC3339, next)
+	if err != nil {
+		return nil
+	}
+
+	overdue := time.Since(due)
+	if overdue <= cnpgScheduledBackupGrace {
+		return nil
+	}
+
+	ns, name := u.GetNamespace(), u.GetName()
+	// The elapsed time rides on `since` rather than the message so it renders
+	// through the same "how long has this been broken" path as every other issue.
+	return []Issue{newConditionIssue(gvr, kind, ns, name, SeverityWarning,
+		"CNPGScheduledBackupMissed",
+		"No backup has run since this schedule was due",
+		overdue, "CNPGScheduledBackupMissed", u.GetCreationTimestamp().Time)}
 }
 
 // A declared object the operator could not apply.

@@ -534,6 +534,10 @@ func (s *Server) setupAppRoutes(r chi.Router) {
 			r.Get("/rbac/whoami", s.handleRBACWhoami)
 			r.Get("/cnpg/imagecatalogs/{namespace}/{name}/clusters", s.handleCNPGCatalogUsers)
 			r.Get("/cnpg/clusterimagecatalogs/{name}/clusters", s.handleCNPGCatalogUsers)
+			r.Get("/velero/backupstoragelocations/{namespace}/{name}/backups", s.handleVeleroStoredBackups)
+			// POST: creates a DownloadRequest, which is the only supported way to
+			// read the messages behind a run's error and warning counts.
+			r.Post("/velero/{kind}/{namespace}/{name}/messages", s.handleVeleroRunMessages)
 
 			r.Get("/namespaces", s.handleNamespaces)
 			r.Get("/api-resources", s.handleAPIResources)
@@ -1650,11 +1654,17 @@ func (s *Server) filterNamespacesByCanRead(r *http.Request, group, resource, ver
 // NodeClass is intentionally excluded here. One synthesized NodeKind contains
 // independently authorized provider APIs, including arbitrary custom kinds;
 // applyClusterScopedTopologyRBAC filters those by exact node GVR instead.
+// Calico policy kinds are also excluded because one NodeKind can represent
+// either projectcalico.org or crd.projectcalico.org; the actual topology nodes
+// are filtered by their exact API group and resource below.
 func (s *Server) deniedClusterScopedTopoKinds(r *http.Request) map[topology.NodeKind]bool {
 	deny := make(map[topology.NodeKind]bool)
 	disc := k8s.GetResourceDiscovery()
 	for _, ck := range topology.ClusterScopedKinds {
 		if ck.Kind == topology.KindNodeClass {
+			continue
+		}
+		if topology.IsCalicoPolicyKind(ck.Kind) {
 			continue
 		}
 		if ck.Group != "" && disc != nil {
@@ -1676,6 +1686,13 @@ func (s *Server) applyClusterScopedTopologyRBAC(r *http.Request, topo *topology.
 	if deny := s.deniedClusterScopedTopoKinds(r); len(deny) > 0 {
 		topo.StripNodeKinds(deny)
 	}
+	allowedCalico := make(map[topology.SARTuple]bool)
+	for _, tuple := range topo.CalicoPolicyRBACTuples() {
+		if s.canRead(r, tuple.Group, tuple.Resource, tuple.Namespace, "list") {
+			allowedCalico[tuple] = true
+		}
+	}
+	topo.StripCalicoPoliciesExcept(allowedCalico)
 	allowedNodeClasses := make(map[topology.SARTuple]bool)
 	for _, tuple := range topo.NodeClassRBACTuples() {
 		if s.canRead(r, tuple.Group, tuple.Resource, "", "list") {

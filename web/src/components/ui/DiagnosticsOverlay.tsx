@@ -4,7 +4,7 @@ import { clsx } from 'clsx'
 import { TRANSITION_BACKDROP, TRANSITION_PANEL } from '../../utils/animation'
 import { openExternal } from '../../utils/navigation'
 import { useDiagnostics } from '../../api/client'
-import type { DiagnosticsSnapshot, DiagMetricsSourceHealth, DiagDropRecord, DiagErrorEntry, DiagCacheSyncStatus, DiagInformerSyncStatus, DiagSyncPhase, DiagSampleWindow } from '../../api/client'
+import type { DiagnosticsSnapshot, DiagEnvVar, DiagMetricsSourceHealth, DiagDropRecord, DiagErrorEntry, DiagCacheSyncStatus, DiagInformerSyncStatus, DiagSyncPhase, DiagSampleWindow } from '../../api/client'
 import { getK8sUIPerfSnapshot, type K8sUIPerfSnapshot } from '@skyhook-io/k8s-ui'
 
 interface DiagnosticsOverlayProps {
@@ -119,6 +119,7 @@ export function DiagnosticsOverlay({ onClose, isOpen = true }: DiagnosticsOverla
               <PermissionsSection data={data} />
               <APIDiscoverySection data={data} />
               <PerfSection data={data} />
+              <DesktopSection data={data} />
               <RuntimeSection data={data} />
               <ConfigSection data={data} />
               {data.errors && data.errors.length > 0 && (
@@ -529,6 +530,35 @@ function formatFrontendUs(w: { count: number; last: number; p50: number; p95: nu
   return `last ${fmt(w.last)} · p50 ${fmt(w.p50)} · p95 ${fmt(w.p95)} · max ${fmt(w.max)} (n=${w.count})`
 }
 
+// An override present but empty is not the same as one that was never set —
+// merely existing is enough to suppress the desktop app's WebKit defaults.
+export function formatEnvValue(v: DiagEnvVar): string {
+  if (!v.set) return '(unset)'
+  return v.value === '' ? '(empty)' : v.value
+}
+
+function DesktopSection({ data }: { data: DiagnosticsSnapshot }) {
+  if (!data.desktop) return null
+  const d = data.desktop
+  const overrides = d.renderOverrides ?? []
+  const sandbox = d.sandbox ?? []
+  return (
+    <Section title="Desktop">
+      {d.displayServer && <Row label="Display Server" value={d.displayServer} />}
+      <Row label="Session Type" value={d.sessionType || '(unset)'} />
+      <Row label="Desktop Environment" value={d.desktopEnvironment || '(unset)'} />
+      {d.webkitLibrary && <Row label="Webview Library" value={d.webkitLibrary} />}
+      {d.gpuPolicy && <Row label="Webview GPU Policy" value={d.gpuPolicy} />}
+      {overrides.map((v) => (
+        <Row key={v.key} label={v.key} value={formatEnvValue(v)} />
+      ))}
+      {sandbox.map((v) => (
+        <Row key={v.key} label={`Sandbox: ${v.key}`} value={v.value} />
+      ))}
+    </Section>
+  )
+}
+
 function RuntimeSection({ data }: { data: DiagnosticsSnapshot }) {
   if (!data.runtime) return null
   const rt = data.runtime
@@ -580,7 +610,7 @@ function CopyButton({ label, onClick, copied }: { label: string; onClick: () => 
 
 // --- GitHub-friendly formatting ---
 
-function formatForGitHub(data: DiagnosticsSnapshot, frontendPerf?: K8sUIPerfSnapshot, includeRawJson = true): string {
+export function formatForGitHub(data: DiagnosticsSnapshot, frontendPerf?: K8sUIPerfSnapshot, includeRawJson = true): string {
   const lines: string[] = []
   lines.push(`## Radar Diagnostics`)
   lines.push(``)
@@ -754,6 +784,21 @@ function formatForGitHub(data: DiagnosticsSnapshot, frontendPerf?: K8sUIPerfSnap
         const fmtUs = (v: number) => v < 1000 ? `${Math.round(v)}μs` : `${(v / 1000).toFixed(2)}ms`
         lines.push(`  - structureKey: ${frontendPerf.totalStructureKeyComputes.toLocaleString()} computes · p50 ${fmtUs(frontendPerf.structureKeyUs.p50)} · p95 ${fmtUs(frontendPerf.structureKeyUs.p95)} · max ${fmtUs(frontendPerf.structureKeyUs.max)}`)
       }
+    }
+    lines.push(``)
+  }
+
+  if (data.desktop) {
+    const d = data.desktop
+    lines.push(`### Desktop`)
+    lines.push(`- Display Server: \`${d.displayServer || '(none)'}\` | Session Type: \`${d.sessionType || '(unset)'}\` | Desktop: \`${d.desktopEnvironment || '(unset)'}\``)
+    if (d.webkitLibrary) lines.push(`- Webview Library: \`${d.webkitLibrary}\``)
+    if (d.gpuPolicy) lines.push(`- Webview GPU Policy: \`${d.gpuPolicy}\``)
+    if (d.renderOverrides && d.renderOverrides.length > 0) {
+      lines.push(`- Render Overrides: ${d.renderOverrides.map((v) => `\`${v.key}=${formatEnvValue(v)}\``).join(' ')}`)
+    }
+    if (d.sandbox && d.sandbox.length > 0) {
+      lines.push(`- Sandbox: ${d.sandbox.map((v) => `\`${v.key}=${v.value}\``).join(' ')}`)
     }
     lines.push(``)
   }

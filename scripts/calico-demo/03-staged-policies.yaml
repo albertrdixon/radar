@@ -1,0 +1,78 @@
+# Staged policies are evaluated but not enforced. The three kinds and the
+# stagedAction values behave differently enough that a UI which treats them all
+# as "a policy that would protect something" gets two of them wrong.
+#
+# A staged Set: it has a real selector and real rules, and promoting it would
+# add coverage. This is the only shape that is a preview of protection.
+apiVersion: projectcalico.org/v3
+kind: StagedNetworkPolicy
+metadata:
+  name: staged-web-tighten
+  namespace: calico-demo
+spec:
+  stagedAction: Set
+  selector: app == 'web'
+  types: ["Ingress"]
+  ingress:
+    - action: Allow
+      protocol: TCP
+      source:
+        selector: app == 'api'
+      destination:
+        ports: [80]
+---
+# A staged Delete, named for the enforced policy it stages the removal of.
+# The Calico API REJECTS any other spec field alongside it:
+#   "Spec fields, except Tier, should all be zero-value if stagedAction is Delete"
+# so it necessarily has no selector. An empty selector normally means "every
+# workload", which would turn a removal into the broadest protection in the
+# cluster — promoting this REMOVES db's only coverage, it does not add any.
+apiVersion: projectcalico.org/v3
+kind: StagedNetworkPolicy
+metadata:
+  name: db-lockdown
+  namespace: calico-demo
+spec:
+  stagedAction: Delete
+---
+# A staged deletion of a policy that really is the only cover for a workload
+# (calico-demo-dev/dev-web is selected by security.baseline and nothing else),
+# so the projected coverage has to fall below today's.
+apiVersion: projectcalico.org/v3
+kind: StagedGlobalNetworkPolicy
+metadata:
+  name: security.baseline
+spec:
+  tier: security
+  stagedAction: Delete
+---
+# Cluster-scoped staged Set with a has() selector.
+apiVersion: projectcalico.org/v3
+kind: StagedGlobalNetworkPolicy
+metadata:
+  name: staged-global-audit
+spec:
+  stagedAction: Set
+  selector: has(role)
+  types: ["Egress"]
+  egress:
+    - action: Log
+---
+# StagedKubernetesNetworkPolicy carries the KUBERNETES spec shape — podSelector
+# and matchLabels — not Calico's selector expressions, and its labels are the
+# raw workload labels without the projectcalico.org/* ones Calico adds to its
+# own endpoints. Feeding it Calico endpoint labels silently matches nothing.
+apiVersion: projectcalico.org/v3
+kind: StagedKubernetesNetworkPolicy
+metadata:
+  name: staged-k8s-agent
+  namespace: calico-demo
+spec:
+  stagedAction: Set
+  podSelector:
+    matchLabels: { app: agent }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: web }

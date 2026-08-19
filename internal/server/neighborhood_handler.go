@@ -159,6 +159,12 @@ func (s *Server) handleAINeighborhood(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sub := topology.BuildNeighborhoodWithIndex(topo, root, opts, idx, dp)
+	// A Calico policy is served by two API groups and admitted through either,
+	// but it advertises one. Point it at the group this caller can address, or
+	// following the node lands on a 403.
+	topology.ReadvertiseCalicoPolicyNodes(sub.Nodes, func(t topology.SARTuple) bool {
+		return s.canRead(r, t.Group, t.Resource, t.Namespace, "get")
+	})
 	if sub.AmbiguousRoot {
 		s.writeError(w, http.StatusBadRequest, "resource kind is ambiguous; provide group")
 		return

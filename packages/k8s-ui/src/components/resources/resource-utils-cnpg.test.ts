@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
+  getCNPGScheduledBackupStatus,
+  getCNPGScheduledBackupNextSchedule,
   getCNPGClusterCertificateExpirations,
   getCNPGClusterStatus,
   getCNPGBackupStatus,
@@ -660,5 +662,57 @@ describe('volume health', () => {
   it('ignores malformed entries rather than rendering them', () => {
     const h = getCNPGVolumeHealth({ status: { pvcCount: 1, healthyPVC: ['ok', 42, null] } })
     expect(h?.healthy).toEqual(['ok'])
+  })
+})
+
+describe('CNPG scheduled backup lateness', () => {
+  const at = (ms: number) => new Date(Date.now() + ms).toISOString()
+  const MIN = 60 * 1000
+
+  const sb = (suspend: boolean, next?: string, lastScheduleTime?: string) => ({
+    spec: { schedule: '0 0 0 * * *', suspend },
+    status: { ...(next ? { nextScheduleTime: next } : {}), ...(lastScheduleTime ? { lastScheduleTime } : {}) },
+  })
+
+  it('reports a schedule that missed its own next-run time', () => {
+    // Ran once, then stopped. Both lastScheduleTime and nextScheduleTime are
+    // present, which is exactly the shape that used to read healthy.
+    const badge = getCNPGScheduledBackupStatus(sb(false, at(-200 * 24 * 60 * MIN), at(-200 * 24 * 60 * MIN)))
+    expect(badge.level).toBe('degraded')
+    expect(badge.text).toBe('Overdue')
+  })
+
+  it('stays healthy inside the operator reconcile window', () => {
+    const badge = getCNPGScheduledBackupStatus(sb(false, at(-1 * MIN), at(-24 * 60 * MIN)))
+    expect(badge.level).toBe('healthy')
+  })
+
+  it('keeps suspended as a deliberate state, not a missed backup', () => {
+    // The operator stops maintaining nextScheduleTime once suspended, so the
+    // stale value must not be read as a missed run.
+    const badge = getCNPGScheduledBackupStatus(sb(true, at(-200 * 24 * 60 * MIN)))
+    expect(badge.text).toBe('Suspended')
+  })
+
+  it('never says overdue while the badge still says healthy', () => {
+    // The two read from one test. Before this they disagreed: the badge said
+    // Active while this field said overdue on the same row.
+    const justPastDue = sb(false, at(-1 * MIN), at(-24 * 60 * MIN))
+    expect(getCNPGScheduledBackupStatus(justPastDue).level).toBe('healthy')
+    expect(getCNPGScheduledBackupNextSchedule(justPastDue)).toBe('due now')
+
+    const longPastDue = sb(false, at(-200 * 24 * 60 * MIN), at(-200 * 24 * 60 * MIN))
+    expect(getCNPGScheduledBackupStatus(longPastDue).level).toBe('degraded')
+    expect(getCNPGScheduledBackupNextSchedule(longPastDue)).toContain('overdue by')
+  })
+
+  it('does not count down to a run that is not coming', () => {
+    expect(getCNPGScheduledBackupNextSchedule(sb(true, at(60 * MIN)))).toBe('suspended')
+    expect(getCNPGScheduledBackupNextSchedule(sb(true, at(-60 * MIN)))).toBe('suspended')
+  })
+
+  it('says nothing when the operator published no next-run time', () => {
+    expect(getCNPGScheduledBackupNextSchedule(sb(false))).toBe('-')
+    expect(getCNPGScheduledBackupStatus(sb(false, undefined, at(-24 * 60 * MIN))).level).toBe('healthy')
   })
 })

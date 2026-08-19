@@ -70,6 +70,7 @@ const (
 	CategoryVolumeAccessModeConflict Category = "volume_access_mode_conflict"
 	CategoryBackupFailed             Category = "backup_failed"
 	CategoryBackupTargetUnavailable  Category = "backup_target_unavailable"
+	CategoryBackupStalled            Category = "backup_stalled"
 	CategoryRolloutStalled           Category = "rollout_stalled"
 	CategoryHPALimitedOrFailed       Category = "hpa_limited_or_failed"
 	CategoryRBACForbidden            Category = "rbac_forbidden"
@@ -148,6 +149,7 @@ var categoryGroup = map[Category]CategoryGroup{
 	CategoryVolumeAccessModeConflict: GroupStorage,
 	CategoryBackupFailed:             GroupStorage,
 	CategoryBackupTargetUnavailable:  GroupStorage,
+	CategoryBackupStalled:            GroupStorage,
 	CategoryRolloutStalled:           GroupScaling,
 	CategoryHPALimitedOrFailed:       GroupScaling,
 	CategoryRBACForbidden:            GroupSecurity,

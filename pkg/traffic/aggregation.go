@@ -11,8 +11,8 @@ import (
 // flowAccumulator collects per-flow L7 details during aggregation.
 type flowAccumulator struct {
 	agg         *AggregatedFlow
-	latencies   []float64          // from RESPONSE flows only (ms)
-	statusCount map[string]int64   // "2xx", "3xx", "4xx", "5xx"
+	latencies   []float64        // measured latencies, excluding request records (ms)
+	statusCount map[string]int64 // "2xx", "3xx", "4xx", "5xx"
 	pathStats   map[string]*pathAcc
 	dnsStats    map[string]*dnsAcc
 	verdicts    map[string]int64
@@ -22,7 +22,7 @@ type flowAccumulator struct {
 
 type pathAcc struct {
 	count        int64
-	latencyCount int64   // only RESPONSE flows with latency
+	latencyCount int64 // flows carrying a measured latency
 	latencySumMs float64
 	errors       int64 // 4xx + 5xx
 }
@@ -38,20 +38,28 @@ func AggregateFlows(flows []Flow) []AggregatedFlow {
 	accumulators := make(map[string]*flowAccumulator)
 
 	for _, f := range flows {
-		key := fmt.Sprintf("%s/%s|%s/%s|%d",
+		// Whether the direction is known is part of the identity, not a property to
+		// be reconciled afterwards. A source that cannot orient some of its traffic
+		// reports it with port 0 — the same port every flow carries when the port
+		// attribute is absent — so oriented and unoriented traffic between one pair
+		// would otherwise land in a single aggregate, and any single answer about
+		// its direction is wrong for half of what it contains. Sources that always
+		// orient their flows contribute a constant here and are unaffected.
+		key := fmt.Sprintf("%s/%s|%s/%s|%d|%t",
 			f.Source.Namespace, f.Source.Name,
 			f.Destination.Namespace, f.Destination.Name,
-			f.Port)
+			f.Port, f.DirectionUnknown)
 
 		acc, ok := accumulators[key]
 		if !ok {
 			acc = &flowAccumulator{
 				agg: &AggregatedFlow{
-					Source:      f.Source,
-					Destination: f.Destination,
-					Protocol:    f.Protocol,
-					Port:        f.Port,
-					LastSeen:    f.LastSeen,
+					Source:           f.Source,
+					Destination:      f.Destination,
+					Protocol:         f.Protocol,
+					Port:             f.Port,
+					LastSeen:         f.LastSeen,
+					DirectionUnknown: f.DirectionUnknown,
 				},
 				statusCount: make(map[string]int64),
 				pathStats:   make(map[string]*pathAcc),
@@ -69,6 +77,11 @@ func AggregateFlows(flows []Flow) []AggregatedFlow {
 		agg.BytesRecv += f.BytesRecv
 		agg.Connections += f.Connections
 		agg.RequestCount += RoundRate(f.RequestRate)
+		// RoundRate, not a bare round: it returns 0 for a zero rate, so it never
+		// invents an error, and its floor of 1 keeps a real but slow failure visible
+		// instead of rounding a genuine 5xx away to no error at all. It also rejects
+		// NaN, which a ratio of two rates produces at zero traffic and which has no
+		// defined conversion to int64.
 		agg.ErrorCount += RoundRate(f.ErrorRate)
 		if f.LastSeen.After(agg.LastSeen) {
 			agg.LastSeen = f.LastSeen
@@ -83,8 +96,11 @@ func AggregateFlows(flows []Flow) []AggregatedFlow {
 			acc.l7Votes[f.L7Protocol] += weight
 		}
 
-		// Latency (only from RESPONSE flows where Hubble measured it)
-		if f.L7Type == "RESPONSE" && f.LatencyNs > 0 {
+		// Latency from any flow that carries a measurement, excluding request
+		// records: for a source that emits L7 records, the latency belongs to the
+		// response. A metric-based source reports a measured duration without
+		// emitting record types at all, and must not be excluded for that.
+		if f.LatencyNs > 0 && f.L7Type != "REQUEST" {
 			acc.latencies = append(acc.latencies, float64(f.LatencyNs)/1e6)
 		}
 
@@ -103,7 +119,8 @@ func AggregateFlows(flows []Flow) []AggregatedFlow {
 				acc.pathStats[pathKey] = pa
 			}
 			pa.count++
-			if f.LatencyNs > 0 && f.L7Type == "RESPONSE" {
+			// Same rule as the edge latency above.
+			if f.LatencyNs > 0 && f.L7Type != "REQUEST" {
 				pa.latencySumMs += float64(f.LatencyNs) / 1e6
 				pa.latencyCount++
 			}

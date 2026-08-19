@@ -85,6 +85,7 @@ const CATEGORY_LABEL: Record<string, string> = {
   volume_access_mode_conflict: 'Volume access conflict',
   backup_failed: 'Backup failed',
   backup_target_unavailable: 'Backup target unavailable',
+  backup_stalled: 'Backup not progressing',
   job_failed: 'Job failed',
   cronjob_failed: 'CronJob failed',
   rollout_stalled: 'Rollout stalled',

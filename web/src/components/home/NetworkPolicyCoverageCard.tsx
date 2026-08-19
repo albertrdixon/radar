@@ -1,6 +1,7 @@
 import type { DashboardNetworkPolicyCoverage } from '../../api/client'
 import { ShieldCheck, ArrowRight } from 'lucide-react'
 import { clsx } from 'clsx'
+import { Tooltip } from '../ui/Tooltip'
 
 interface NetworkPolicyCoverageCardProps {
   data: DashboardNetworkPolicyCoverage
@@ -8,9 +9,23 @@ interface NetworkPolicyCoverageCardProps {
 }
 
 export function NetworkPolicyCoverageCard({ data, onNavigate }: NetworkPolicyCoverageCardProps) {
+  const hasStagedPolicies = (data.stagedPolicies ?? 0) > 0
+  // A staged policy can stage a deletion, so the projected coverage is allowed
+  // to be lower than today's. Clamping it would hide exactly the case an
+  // operator most needs to see before promoting the staged set.
+  const coveredIfStaged = data.coveredWorkloadsIfStaged ?? data.coveredWorkloads
+  const stagedDelta = coveredIfStaged - data.coveredWorkloads
   const percentage = data.totalWorkloads > 0
     ? Math.round((data.coveredWorkloads / data.totalWorkloads) * 100)
     : 0
+  const percentageIfStaged = data.totalWorkloads > 0
+    ? Math.round((coveredIfStaged / data.totalWorkloads) * 100)
+    : 0
+  const enforcedPercentage = hasStagedPolicies ? Math.min(percentage, percentageIfStaged) : percentage
+  // Gated on the same condition as the segment that draws it, so the three
+  // widths always sum to the full track even for a host that supplies a
+  // projection without any staged policies.
+  const stagedDeltaPercentage = hasStagedPolicies ? Math.abs(percentageIfStaged - percentage) : 0
   const hasPolicies = data.totalPolicies > 0
   const accentColor = !hasPolicies
     ? 'text-theme-text-tertiary'
@@ -48,28 +63,56 @@ export function NetworkPolicyCoverageCard({ data, onNavigate }: NetworkPolicyCov
             <>
               <div className="flex items-center gap-3 w-full">
                 <div className="flex-1 h-3 rounded-full overflow-hidden bg-theme-hover flex">
-                  {data.coveredWorkloads > 0 && (
+                  {enforcedPercentage > 0 && (
                     <div
                       className="h-full bg-green-500"
-                      style={{ width: `${percentage}%` }}
+                      style={{ width: `${enforcedPercentage}%` }}
                     />
                   )}
-                  {data.totalWorkloads - data.coveredWorkloads > 0 && (
+                  {hasStagedPolicies && stagedDeltaPercentage > 0 && (
+                    // The width belongs on the flex child; the tooltip wrapper
+                    // inside it carries the hover target.
+                    <div className="h-full" style={{ width: `${stagedDeltaPercentage}%` }}>
+                      <Tooltip
+                        content={stagedDelta > 0
+                          ? `${stagedDelta} more workloads covered if staged policies are applied`
+                          : `${-stagedDelta} workloads lose coverage if staged policies are applied`}
+                        wrapperClassName="!block h-full w-full"
+                      >
+                        <div
+                          className={clsx('h-full w-full', stagedDelta > 0 ? 'text-yellow-500' : 'text-red-500')}
+                          style={{
+                            backgroundImage: 'repeating-linear-gradient(135deg, currentColor 0, currentColor 2px, transparent 2px, transparent 5px)',
+                          }}
+                        />
+                      </Tooltip>
+                    </div>
+                  )}
+                  {100 - enforcedPercentage - stagedDeltaPercentage > 0 && (
                     <div
                       className="h-full bg-theme-hover"
-                      style={{ width: `${100 - percentage}%` }}
+                      style={{ width: `${100 - enforcedPercentage - stagedDeltaPercentage}%` }}
                     />
                   )}
                 </div>
-                <span className={clsx('text-sm font-semibold tabular-nums', accentColor)}>
-                  {percentage}%
-                </span>
+                <div className="flex shrink-0 flex-col items-end tabular-nums">
+                  <span className={clsx('text-sm font-semibold', accentColor)}>{percentage}%</span>
+                  {hasStagedPolicies && (
+                    <span className="text-[10px] text-theme-text-tertiary">({percentageIfStaged}% if staged applied)</span>
+                  )}
+                </div>
               </div>
 
               <div className="grid grid-cols-1 gap-y-2 mt-4 w-full">
                 <StatRow label="Policies" value={data.totalPolicies} />
                 <StatRow label="Covered workloads" value={data.coveredWorkloads} total={data.totalWorkloads} />
+                {hasStagedPolicies && (
+                  <StatRow label="Covered if staged" value={coveredIfStaged} total={data.totalWorkloads} />
+                )}
                 <StatRow label="Uncovered workloads" value={data.totalWorkloads - data.coveredWorkloads} warn />
+                {hasStagedPolicies && (
+                  <StatRow label="Uncovered if staged" value={data.totalWorkloads - coveredIfStaged} warn />
+                )}
               </div>
             </>
           )}

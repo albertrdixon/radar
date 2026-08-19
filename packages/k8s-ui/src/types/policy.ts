@@ -150,3 +150,44 @@ export interface CNPGCatalogUser {
 export interface CNPGCatalogUsersResponse {
   clusters: CNPGCatalogUser[]
 }
+
+/** What one Velero BackupStorageLocation holds, from the stored-backups lookup. */
+export interface VeleroStoredBackupsResponse {
+  backups: Array<{
+    namespace: string
+    name: string
+    phase?: string
+    expiration?: string
+    completed?: string
+  }>
+  /** How many reached Completed and are still inside their retention — the rest
+   *  are stored here but are not something to restore from. Counted over the
+   *  whole location, like `stored`: recomputing it from the capped list above
+   *  undercounts every location big enough to be capped. */
+  restorable: number
+  /** How many reached Completed but have aged out. Same scope as `restorable`. */
+  expired?: number
+  /** How many the location holds in total, counted before the list was capped. */
+  stored?: number
+  /** The list above is a page, not the whole location. */
+  truncated?: boolean
+}
+
+/** One warning or error behind a Velero run's counts, with the scope Velero
+ *  filed it under: "velero", "cluster", or a namespace name. */
+export interface VeleroMessage {
+  scope: string
+  message: string
+}
+
+/** What a Backup or Restore actually reported, fetched on demand.
+ *
+ *  The counts live on the CR; these messages do not — they are in a results
+ *  file in object storage that only Velero's controller can hand out a link to.
+ *  So this is never present until someone asks for it. */
+export interface VeleroRunMessagesResponse {
+  warnings: VeleroMessage[]
+  errors: VeleroMessage[]
+  /** Set when the results file held more than were returned. */
+  truncated?: boolean
+}

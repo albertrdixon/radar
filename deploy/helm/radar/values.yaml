@@ -130,6 +130,7 @@ rbac:
     apiRegistration: true   # apiregistration.k8s.io (APIService health for aggregated APIs)
     argo: true              # argoproj.io
     awx: true               # awx.ansible.com
+    calico: true            # projectcalico.org, crd.projectcalico.org (Calico policies, IPPools, HostEndpoints, Tiers)
     certManager: true       # cert-manager.io, acme.cert-manager.io
     cilium: true            # cilium.io (CiliumClusterwideNetworkPolicy etc. in topology)
     cloudnativePg: true     # postgresql.cnpg.io, barmancloud.cnpg.io (CloudNativePG: Clusters, Poolers, Backups, ObjectStores)

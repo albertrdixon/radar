@@ -131,8 +131,32 @@ export function getBackupQueuePosition(resource: any): number | null {
   return typeof pos === 'number' ? pos : null
 }
 
+// The name a Backup carries, applying Velero's fallback by name only. Callers
+// that hold the location list should prefer resolveBackupStorageLocation, which
+// applies Velero's actual rule.
 export function getBackupStorageLocation(resource: any): string {
   return resource.spec?.storageLocation || 'default'
+}
+
+// Velero resolves an unset spec.storageLocation to whichever location carries
+// spec.default — a flag, not a name. The literal name "default" is only the
+// fallback when nothing claims the flag, and an install that renamed its
+// default location has no such object at all: the health lookup finds nothing
+// and the link points at a name that does not exist.
+//
+// Mirrors the server-side resolution behind the stored-backups endpoint so the
+// two cannot disagree about which location holds a backup.
+export function getVeleroDefaultLocationName(locations: any[] | undefined): string {
+  for (const l of locations ?? []) {
+    if (l?.spec?.default === true && l?.metadata?.name) return l.metadata.name
+  }
+  return ''
+}
+
+export function resolveBackupStorageLocation(resource: any, locations: any[] | undefined): string {
+  const declared = resource?.spec?.storageLocation
+  if (declared) return declared
+  return getVeleroDefaultLocationName(locations) || 'default'
 }
 
 export function getBackupIncludedNamespaces(resource: any): string[] {
@@ -194,6 +218,22 @@ export function getBackupValidationErrors(resource: any): string[] {
 
 export function getBackupTTL(resource: any): string {
   return resource.spec?.ttl || '-'
+}
+
+/**
+ * How long this backup allows a single operation before it has outlived its own
+ * budget. Shown because the stalled-run issue measures against this field and
+ * quotes it — without it on the page, the message cites a number from a spec
+ * option the page lists every sibling of.
+ *
+ * Unset renders as "default", the same word getBackupSnapshotVolumes uses for
+ * the same situation — not as a number. Velero's built-in is four hours, but the
+ * controller takes `--default-item-operation-timeout` and distributions ship
+ * their own, so printing 4h here would state an install setting nothing on this
+ * page can read.
+ */
+export function getBackupItemOperationTimeout(resource: any): string {
+  return resource.spec?.itemOperationTimeout || 'default'
 }
 
 export function getBackupSnapshotVolumes(resource: any): string {
@@ -482,4 +522,32 @@ export function getBackupRepositoryStatus(resource: any): StatusBadge {
 // repository is a migration liability, not just a configuration detail.
 export function getBackupRepositoryType(resource: any): string {
   return resource.spec?.repositoryType || '-'
+}
+
+// The namespace whose volumes this repository holds. One repository per
+// (namespace, location, type) is how Velero partitions them, so this is what
+// the repository is *for* rather than where the object lives.
+export function getBackupRepositoryVolumeNamespace(resource: any): string {
+  return resource.spec?.volumeNamespace || '-'
+}
+
+export function getBackupRepositoryLocation(resource: any): string {
+  return resource.spec?.backupStorageLocation || '-'
+}
+
+export function getBackupRepositoryMaintenanceFrequency(resource: any): string {
+  return resource.spec?.maintenanceFrequency || '-'
+}
+
+export function getBackupRepositoryLastMaintenance(resource: any): string {
+  const at = resource.status?.lastMaintenanceTime
+  if (!at) return '-'
+  return formatAge(at)
+}
+
+// Why the repository is not ready, in the controller's own words. Velero writes
+// it on the object and nowhere else, so without it the phase is the whole story
+// a reader gets.
+export function getBackupRepositoryMessage(resource: any): string {
+  return resource.status?.message || ''
 }

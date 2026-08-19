@@ -699,16 +699,17 @@ Velero reports every outcome through `status.phase` and has no `status.condition
 | `ScheduleValidationFailed` | `phase == FailedValidation`, or non-empty `status.validationErrors` | critical |
 | `BackupStorageLocationUnavailable` | `BSL.status.phase == Unavailable` | critical |
 | `BackupRepositoryNotReady` | `BackupRepository.status.phase == NotReady` | warning |
+| `VeleroRunStalled` | a `Backup` or `Restore` still in `InProgress`, `WaitingForPluginOperations` or `Finalizing` whose `status.startTimestamp` is older than its `spec.itemOperationTimeout` (Velero's built-in four hours when it declares none). `Deleting` is excluded — its `startTimestamp` belongs to the original run. The message is worded per phase: see the limitation below | warning |
 
-They roll up under two categories: `backup_failed` for runs, and `backup_target_unavailable` for the location/repository kinds — an unreachable destination is a different fix from a run that failed.
+They roll up under three categories, split by what you'd go and look at: `backup_failed` for runs that already have an outcome, `backup_target_unavailable` for the location/repository kinds, and `backup_stalled` for `VeleroRunStalled`. A run with no verdict is not a failed run — it has no error to read, only a controller to check — and calling it one puts "Backup failed" above a message saying it is still in progress.
 
-**Supersession.** Velero retains failed `Backup` objects until their TTL expires, so a raw phase-to-issue mapping would keep one bad night red for days. Backups group by the `velero.io/schedule-name` label; only the newest run that reached a verdict raises an issue, a later `Completed` clears the series, and an in-progress run neither clears nor raises. Ad-hoc (unlabelled) backups are their own series, so nothing supersedes them. Restores get no supersession — they are one-off operator actions, not a recurring series.
+**Supersession.** Velero retains failed `Backup` objects until their TTL expires, so a raw phase-to-issue mapping would keep one bad night red for days. Backups group by the `velero.io/schedule-name` label; only the newest run that already has an outcome raises an issue (the two `*PartiallyFailed` phases count — the partial failure is a fact even though Velero is still finalizing), a later `Completed` clears the series, and an in-progress run neither clears nor raises. Ad-hoc (unlabelled) backups are their own series, so nothing supersedes them. Restores get no supersession — they are one-off operator actions, not a recurring series.
 
 **A paused Schedule is not an issue.** Pausing is operator intent; the Schedule list and detail view show the state without adding queue noise.
 
 **Namespace attribution.** Issues attribute to the Velero object's own namespace (`velero`, or `kommander` on NKP). They are therefore admin-visible, but *not* visible to a user whose namespace view-filter excludes the Velero namespace — including one scoped only to the namespace whose data was lost. Surfacing a failure against the *protected* namespaces needs the protection-coverage model and is not part of this.
 
-**What is not detected yet.** Every detection above is driven by a phase Velero actually wrote. Radar does not yet detect the *absence* of a run — a schedule that quietly stopped firing (controller down, wrong cron, schedule deleted) leaves its last run `Completed`, so no issue is raised even though backups have silently stopped. The same applies to a run wedged in an active phase past its `itemOperationTimeout`. Both need the schedule cadence modelled against Velero's real controller semantics (a due run is *skipped* while a prior backup is in flight, and `itemOperationTimeout` is configurable), which is tracked separately. **Treat "no Velero issues" as "no run reported a failure", not as "backups are healthy."**
+**What is not detected yet.** Every detection above is driven by something Velero wrote — a phase, or in the stalled case a `startTimestamp` measured against the run's own budget. Radar does not yet detect the *absence* of a run: a schedule that quietly stopped firing (controller down, wrong cron, schedule deleted) leaves its last run `Completed`, so no issue is raised even though backups have silently stopped. That needs the schedule cadence modelled against Velero's real controller semantics (a due run is *skipped* while a prior backup is in flight), which is tracked separately. **Treat "no Velero issues" as "nothing Velero recorded looks wrong", not as "backups are healthy."**
 
 ### Supported CRDs
 
@@ -719,9 +720,15 @@ They roll up under two categories: `backup_failed` for runs, and `backup_target_
 | Schedule | `velero.io/v1` | — | Yes | Yes | — |
 | BackupStorageLocation | `velero.io/v1` | — | Yes | Yes | — |
 | VolumeSnapshotLocation | `velero.io/v1` | — | Yes | — | — |
-| BackupRepository | `velero.io/v1` | — | — | Yes | — |
+| BackupRepository | `velero.io/v1` | — | Yes | Yes | — |
 
-**Kind collisions.** `restores` and `schedules` are shared plurals — `rancher/backup-restore-operator` ships `restores.resources.cattle.io`, and several operators ship their own `schedules` kind. For those two, Radar's renderers, status readers, column sets and cells all select on the `velero.io` group, so a foreign resource with the same plural falls through to the generic renderer instead of being dressed up as a backup. `backupstoragelocations` and `volumesnapshotlocations` are keyed on the plural alone — no other operator is known to claim those names — though their renderers and cells still group-guard. The kind→colour and kind→icon tables have no group awareness at all, so only Velero-unique kinds appear in them: `Backup`, `Restore` and `Schedule` are deliberately left unstyled rather than risk decorating a foreign resource.
+**Kind collisions.** `restores` and `schedules` are shared plurals — `rancher/backup-restore-operator` ships `restores.resources.cattle.io`, and several operators ship their own `schedules` kind. For those two, Radar's renderers, status readers, column sets and cells all select on the `velero.io` group, so a foreign resource with the same plural falls through to the generic renderer instead of being dressed up as a backup. `backupstoragelocations`, `volumesnapshotlocations` and `backuprepositories` are keyed on the plural alone — no other operator is known to claim those names — though their renderers and cells still group-guard, and each is listed in the fall-through so a foreign CRD with the plural reaches the generic renderer rather than a blank drawer. The kind→colour and kind→icon tables have no group awareness at all, so only Velero-unique kinds appear in them: `Backup`, `Restore` and `Schedule` are deliberately left unstyled rather than risk decorating a foreign resource.
+
+**Limitations**:
+- **A backup's phase is not its restorability.** `Completed` says the run finished, which stays true after the storage location holding it goes Unavailable or its TTL expires. The BackupStorageLocation page carries the consequence — what it holds and how much of it is worth planning a recovery around — because the Backup's own status cannot observe it. The two are distinguished deliberately: an Unavailable location means a restore cannot happen now, while an expired backup means Velero intends to delete it. Velero's restore controller does not check expiration, so until the garbage collector reaches it the data is still there and a restore would work; it is excluded from the restorable count because it is not something to depend on, not because it is already gone.
+- **A stalled run is inferred from elapsed time, and only one phase is measured against a real limit.** `spec.itemOperationTimeout` is, in Velero's own words, "the time used to wait for asynchronous BackupItemAction operations" — so it governs `WaitingForPluginOperations` and nothing else. A run past it *there* has outlived a limit Velero set, and the message says so. A run past it in `InProgress` or `Finalizing` has only been running a while: Velero puts no bound on walking and writing items, and a large cluster legitimately takes hours, so the message reports the elapsed time, states that Velero sets no limit on the phase, and offers the timeout only as a yardstick. Where the number comes from is named either way — the run's own field, or Velero's built-in four hours, which the controller's `--default-item-operation-timeout` can change and which is not readable from the CRs. Radar also does not check whether the Velero controller is running, so no message names a cause.
+- **The messages behind a run's counts need a live controller and reachable storage.** `POST /api/velero/{backups|restores}/{ns}/{name}/messages` fetches them on demand: Radar creates a `DownloadRequest`, Velero answers with a pre-signed URL, and Radar reads the results file from object storage. Both preconditions are real and are reported rather than hidden — a stopped controller never answers, and a URL signed for a host only the cluster can resolve cannot be fetched from a laptop (Velero's `publicUrl` on the storage location is what makes it reachable). Data-mover objects (`DataUpload`/`DataDownload`), full backup logs, and progress counters *while a run is in flight* remain out of reach. The final item count is not in that list — `live` takes a real backup and the count Radar renders is Velero's own.
+- **Partly verified against fixtures.** `./scripts/velero-demo.sh live` runs Velero against in-cluster object storage, so the restorability claims above are exercised against work Velero really did: a backup written to a bucket, a restore that recreated a deleted namespace, a location marked `Unavailable` by Velero's own validation while still holding a `Completed` backup, and a run left in flight past its own `itemOperationTimeout`. `PartiallyFailed` is produced there too, by a pre-backup hook that exits non-zero, and `FailedValidation` by aiming a backup at the location Velero has just marked `Unavailable`. The data-mover objects (`DataUpload`/`DataDownload`) appear in neither mode — `up` deliberately does not fake them, and `live` has no snapshot-capable CSI driver to make Velero emit them. Coverage matrix: `scripts/velero-demo/README.md`.
 
 ---
 
@@ -1227,15 +1234,15 @@ The [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-op
 
 ## Network Policies
 
-[Network Policies](https://kubernetes.io/docs/concepts/services-networking/network-policies/) control pod-to-pod and pod-to-external traffic at the network level. Radar supports standard Kubernetes NetworkPolicy as well as Cilium's CiliumNetworkPolicy and CiliumClusterwideNetworkPolicy CRDs, providing visibility into what traffic is allowed, denied, and which workloads are unprotected.
+[Network Policies](https://kubernetes.io/docs/concepts/services-networking/network-policies/) control pod-to-pod and pod-to-external traffic at the network level. Radar supports standard Kubernetes NetworkPolicy, Cilium policies, and [Calico policies](https://docs.tigera.io/calico/latest/network-policy/), providing visibility into what traffic is allowed, denied, and which workloads are unprotected.
 
 ### What Radar Shows
 
-**Topology:** NetworkPolicy and CiliumNetworkPolicy nodes appear in the topology graph with edges connecting them to the workloads they protect. See at a glance which deployments have network policies applied and which are exposed.
+**Topology:** Kubernetes, Cilium, and Calico policy nodes appear in the topology graph with edges connecting them to the Deployments, StatefulSets, and DaemonSets they protect. Calico matching evaluates workload, namespace, and service-account selectors. Staged Calico policies use dashed edges and preview styling so they are not mistaken for enforced protection; a staged policy whose `stagedAction` is `Delete` or `Ignore` draws no edge at all, because promoting it would remove protection rather than add it.
 
 <p align="center">
-  <img src="screenshots/integrations/netpol-topology.png" alt="Network Policy Topology" width="800">
-  <br><em>Network Policies in Topology View — policies connected to protected workloads</em>
+  <img src="screenshots/integrations/calico-policy-topology.png" alt="Calico policy topology" width="900">
+  <br><em>Calico policy topology — enforced relationships use solid edges; staged previews use dashed edges</em>
 </p>
 
 **Policy Flow Diagram:** Each NetworkPolicy detail drawer includes a visual flow diagram showing ingress and egress rules as a directional graph — sources on the left, targets on the right, with ports and protocols labeled. Quickly understand what a policy allows without reading YAML.
@@ -1245,11 +1252,11 @@ The [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-op
   <br><em>Policy Flow Diagram — visual representation of ingress and egress rules</em>
 </p>
 
-**Dashboard Coverage Card:** The home dashboard includes a Network Policy Coverage card showing total policy count, the percentage of workloads covered by at least one policy, and a count of uncovered workloads. Click through to browse all policies.
+**Dashboard Coverage Card:** The home dashboard includes a Network Policy Coverage card showing total policy count, the percentage of workloads covered by at least one enforced policy, and a count of uncovered workloads. When staged Calico policies exist, it separately shows projected coverage if those policies were applied. That projection can be **lower** than today's coverage — a staged deletion removes the protection of the policy it names — and the bar marks the part that would be lost.
 
 <p align="center">
-  <img src="screenshots/integrations/netpol-dashboard-card.png" alt="Network Policy Coverage Card" width="400">
-  <br><em>Dashboard Coverage Card — policy count, coverage percentage, and uncovered workloads</em>
+  <img src="screenshots/integrations/calico-dashboard-coverage.png" alt="Network Policy Coverage Card with staged Calico coverage" width="354">
+  <br><em>Dashboard coverage separates enforced protection from the projected result of applying staged policies</em>
 </p>
 
 **Cilium Policy Detail View:**
@@ -1258,6 +1265,30 @@ The [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-op
 - Cilium-specific entity selectors (world, cluster, host)
 - CIDR rules, port/protocol specifications
 - Related workloads with clickable links
+
+**Calico Policy Detail View:**
+- Flow diagram for ordered ingress and egress rules, including Allow, Deny, Log, and Pass actions
+- Workload, namespace, and service-account selectors
+- Tier, order, policy types, pre-DNAT, apply-on-forward, and do-not-track settings
+- Calico entities, CIDRs, ports, protocols, HTTP matches, and ICMP matches
+- Staged action and preview styling for staged policy variants
+
+<p align="center">
+  <img src="screenshots/integrations/calico-networkpolicy-detail.png" alt="Calico NetworkPolicy detail" width="380">
+  &nbsp;&nbsp;
+  <img src="screenshots/integrations/calico-staged-policy-detail.png" alt="Calico staged NetworkPolicy detail" width="380">
+  <br><em>Enforced and staged policy flows — staged rules are explicitly marked as evaluated but not enforced</em>
+</p>
+
+**Calico Infrastructure Detail Views:** IPPool details show CIDR, encapsulation, NAT, block size, assignment mode, and node selectors. HostEndpoints show interface, expected IP addresses, profiles, and a link to the owning Node. Tier details show order and default action, and policies link back to their Tier.
+
+Radar recognizes both `projectcalico.org` and `crd.projectcalico.org`. A cluster
+running the Calico API server serves the same stored policies under both, so each
+policy appears once, identified by kind, namespace and name. The API group stays
+part of resource navigation and authorization — it is what keeps Calico
+`NetworkPolicy` distinct from Kubernetes `networking.k8s.io` NetworkPolicy — and
+a policy is shown to anyone authorized to list it under **either** group, since
+either grant is enough to read it.
 
 <p align="center">
   <img src="screenshots/integrations/netpol-cilium-renderer.png" alt="CiliumNetworkPolicy Detail" width="400">
@@ -1284,6 +1315,18 @@ The [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-op
 | NetworkPolicy | `networking.k8s.io/v1` | Yes | Yes | Yes |
 | CiliumNetworkPolicy | `cilium.io/v2` | Yes | Yes | Yes |
 | CiliumClusterwideNetworkPolicy | `cilium.io/v2` | Yes | Yes | Yes |
+| NetworkPolicy | `projectcalico.org/v3`, `crd.projectcalico.org/v1` | Yes | Yes | Yes |
+| GlobalNetworkPolicy | `projectcalico.org/v3`, `crd.projectcalico.org/v1` | Yes | Yes | Yes |
+| StagedNetworkPolicy | `projectcalico.org/v3`, `crd.projectcalico.org/v1` | Yes (preview) | Yes | Yes |
+| StagedGlobalNetworkPolicy | `projectcalico.org/v3`, `crd.projectcalico.org/v1` | Yes (preview) | Yes | Yes |
+| StagedKubernetesNetworkPolicy | `projectcalico.org/v3`, `crd.projectcalico.org/v1` | Yes (preview) | Yes | Yes |
+| IPPool | `projectcalico.org/v3`, `crd.projectcalico.org/v1` | No | Yes | Yes |
+| HostEndpoint | `projectcalico.org/v3`, `crd.projectcalico.org/v1` | No | Yes | Yes |
+| Tier | `projectcalico.org/v3`, `crd.projectcalico.org/v1` | No | Yes | Yes |
+
+### Calico Coverage Limits
+
+Radar statically evaluates Calico selectors against workload pod templates and the Namespace and ServiceAccount objects it can read. The result describes declared policy coverage, not live CNI enforcement or packet-level behavior. Missing labels or RBAC-restricted resources can prevent a relationship from being inferred, and staged policies are never included in enforced coverage. The projected "if staged" figure assumes every staged policy is promoted at once; it is a projection of the declared rules, not a simulation of what the data plane would do.
 
 ---
 

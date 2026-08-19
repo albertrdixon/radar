@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import type { TrafficSourcesResponse, TrafficWizardState } from '../../types'
 import { CheckCircle2, XCircle, AlertTriangle, Copy, ExternalLink, ArrowRight, ArrowLeft, Package } from 'lucide-react'
-import { assetUrl, PaneLoader } from '@skyhook-io/k8s-ui'
+import { AlertBanner, assetUrl, PaneLoader } from '@skyhook-io/k8s-ui'
 import radarLoadingIcon from '@skyhook-io/k8s-ui/assets/radar/radar-icon-loading.svg'
 import { InstallWizard } from '../helm/InstallWizard'
 
@@ -202,6 +202,18 @@ export function TrafficWizard({
                   </div>
                 </div>
               </div>
+            ))}
+
+            {/* Installed but unusable — a fixable configuration, not an error */}
+            {sourcesData?.detected.filter(s => s.status === 'not_found').map(source => (
+              <AlertBanner
+                key={source.name}
+                variant="warning"
+                // Source names are lowercase ids; the block this replaced applied a
+                // capitalize class, which an AlertBanner title (a plain string) cannot.
+                title={`${source.name.charAt(0).toUpperCase()}${source.name.slice(1)}${source.version ? ` ${source.version}` : ''} is installed but not usable`}
+                message={source.message}
+              />
             ))}
 
             {/* Recommendation */}

@@ -1,5 +1,10 @@
-# Restores across the phase vocabulary, including both partial-failure
-#   variants that collapse onto a single label in the table.
+# One Restore per phase in the v1.18 enum — all 10, the same rule
+# 40-backups-phases.yaml follows for Backups.
+#
+# Both partial-failure variants are here on purpose: they collapse onto a single
+# label in the table, and they are the two phases in which a Restore is still
+# working while already carrying a failure — so they are also the two that can
+# wedge and be reported as not progressing.
 ---
 apiVersion: velero.io/v1
 kind: Restore
@@ -105,4 +110,47 @@ spec:
     - default
 status:
   phase: WaitingForPluginOperations
+  startTimestamp: "@now-1870m"
+---
+apiVersion: velero.io/v1
+kind: Restore
+metadata:
+  name: r-new
+  namespace: velero
+spec:
+  backupName: nightly-20260807010000
+  includedNamespaces:
+    - default
+status:
+  # Accepted, not yet picked up: no startTimestamp at all. Nothing may time it.
+  phase: New
+---
+apiVersion: velero.io/v1
+kind: Restore
+metadata:
+  name: r-finalizing
+  namespace: velero
+spec:
+  backupName: nightly-20260807010000
+  includedNamespaces:
+    - default
+status:
+  phase: Finalizing
+  startTimestamp: "@now-1870m"
+---
+apiVersion: velero.io/v1
+kind: Restore
+metadata:
+  name: r-waitingforpluginoperations-partial
+  namespace: velero
+spec:
+  backupName: nightly-20260807010000
+  includedNamespaces:
+    - default
+status:
+  # Still waiting on plugin operations and already partially failed, ~31h in.
+  # The pair this file's header names, and the shape that reports both its
+  # partial failure and that nothing is advancing it.
+  errors: 2
+  phase: WaitingForPluginOperationsPartiallyFailed
   startTimestamp: "@now-1870m"

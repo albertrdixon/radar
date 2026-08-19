@@ -20,6 +20,19 @@ status:
   lastBackup: "@now-1870m"
   phase: Enabled
 ---
+# Synthetic on two counts, both deliberate, because this fixture guards two
+# different things that Velero itself will not produce together.
+#
+# The missing phase: v1.18's schedule controller writes status.phase and
+# status.validationErrors in one assignment, so it does not emit errors without
+# FailedValidation. The detector checks the array independently anyway, for
+# older versions, and this exercises that branch.
+#
+# The error text: v1.18 validates only the cron expression, so it would not
+# report a missing storage location. It says so here on purpose — the cron below
+# is valid, so this is the counter-example that catches anything deriving
+# "invalid cron" from the mere presence of validation errors. Replacing it with
+# a cron error would remove the only fixture testing that distinction.
 apiVersion: velero.io/v1
 kind: Schedule
 metadata:

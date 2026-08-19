@@ -17,15 +17,7 @@ import type { AddonMode } from './TrafficView'
 import { getNamespaceColor } from '../../utils/traffic-colors'
 import { Tooltip } from '../ui/Tooltip'
 import { Input } from '@skyhook-io/k8s-ui'
-
-// Connection threshold options
-const CONNECTION_THRESHOLDS = [
-  { value: 0, label: 'All traffic' },
-  { value: 100, label: '100+ connections' },
-  { value: 1000, label: '1K+ connections' },
-  { value: 10000, label: '10K+ connections' },
-  { value: 100000, label: '100K+ connections' },
-]
+import { volumeThresholds } from './trafficFilters'
 
 // Time range options
 const TIME_RANGES = [
@@ -63,7 +55,19 @@ interface TrafficFilterSidebarProps {
   setTimeRange: (v: string) => void
 
   // L7 filters (Hubble-only)
-  isHubble?: boolean
+  /** Whether the flows carry any L7 detail at all. Not "is this Hubble": Beyla and
+   *  Istio report L7 too, and gating on the source name hid these filters from them. */
+  showL7Filters?: boolean
+  /** Status buckets that can actually match. A source reporting no status
+   *  distribution still reports an error rate, so 5xx can be offered on the strength
+   *  of that while the others would match nothing. */
+  availableStatusRanges?: string[]
+  availableVerdicts?: string[]
+  hasDNSQueries?: boolean
+  availableHTTPMethods?: string[]
+  /** The active source measures rates rather than counting events, which changes
+   *  both the unit and the useful scale of the volume filter. */
+  isRateBased?: boolean
   l7Protocol: string // 'all' | 'HTTP' | 'DNS' | 'TCP'
   setL7Protocol: (v: string) => void
   l7Methods: Set<string>
@@ -154,7 +158,12 @@ export const TrafficFilterSidebar = memo(function TrafficFilterSidebar({
   setDetectServices,
   timeRange,
   setTimeRange,
-  isHubble,
+  showL7Filters,
+  availableStatusRanges = [],
+  availableVerdicts = [],
+  hasDNSQueries,
+  availableHTTPMethods = [],
+  isRateBased,
   l7Protocol,
   setL7Protocol,
   l7Methods,
@@ -209,7 +218,7 @@ export const TrafficFilterSidebar = memo(function TrafficFilterSidebar({
               onChange={(e) => setMinConnections(Number(e.target.value))}
               className="flex-1 bg-theme-elevated text-theme-text-primary text-xs rounded px-2 py-1.5 border border-theme-border focus:outline-none focus:ring-1 focus:ring-blue-500"
             >
-              {CONNECTION_THRESHOLDS.map(({ value, label }) => (
+              {volumeThresholds(isRateBased).map(({ value, label }) => (
                 <option key={value} value={value}>{label}</option>
               ))}
             </select>
@@ -316,8 +325,10 @@ export const TrafficFilterSidebar = memo(function TrafficFilterSidebar({
           </div>
         </div>
 
-        {/* L7 Filters (Hubble only) */}
-        {isHubble && (
+        {/* L7 filters, shown whenever the flows carry L7 detail. Every control below
+            is gated on data that exists, so the panel never offers one that cannot
+            return anything. */}
+        {showL7Filters && (
           <div className="space-y-2 px-3 py-2 border-t border-theme-border">
             <div className="flex items-center gap-1.5">
               <Filter className="w-3 h-3 text-theme-text-tertiary" />
@@ -346,12 +357,13 @@ export const TrafficFilterSidebar = memo(function TrafficFilterSidebar({
             </div>
 
             {/* HTTP sub-filters (visible when protocol is All or HTTP) */}
-            {(l7Protocol === 'all' || l7Protocol === 'HTTP') && (
+            {(l7Protocol === 'all' || l7Protocol === 'HTTP') && (availableHTTPMethods.length > 0 || availableStatusRanges.length > 0) && (
               <>
+                {availableHTTPMethods.length > 0 && (
                 <div>
                   <div className="text-[10px] text-theme-text-tertiary mb-1">HTTP Method</div>
                   <div className="flex flex-wrap gap-1">
-                    {['GET', 'POST', 'PUT', 'DELETE', 'PATCH'].map(method => (
+                    {availableHTTPMethods.map(method => (
                       <button
                         key={method}
                         onClick={() => onToggleL7Method(method)}
@@ -367,7 +379,9 @@ export const TrafficFilterSidebar = memo(function TrafficFilterSidebar({
                     ))}
                   </div>
                 </div>
+                )}
 
+                {availableStatusRanges.length > 0 && (
                 <div>
                   <div className="text-[10px] text-theme-text-tertiary mb-1">Status Code</div>
                   <div className="flex flex-wrap gap-1">
@@ -376,7 +390,7 @@ export const TrafficFilterSidebar = memo(function TrafficFilterSidebar({
                       { label: '3xx', active: SEVERITY_BADGE.info },
                       { label: '4xx', active: SEVERITY_BADGE.warning },
                       { label: '5xx', active: SEVERITY_BADGE.error },
-                    ] as const).map(({ label, active }) => (
+                    ] as const).filter(({ label }) => availableStatusRanges.includes(label)).map(({ label, active }) => (
                       <button
                         key={label}
                         onClick={() => onToggleL7StatusRange(label)}
@@ -392,11 +406,12 @@ export const TrafficFilterSidebar = memo(function TrafficFilterSidebar({
                     ))}
                   </div>
                 </div>
+                )}
               </>
             )}
 
             {/* DNS sub-filter (visible when protocol is All or DNS) */}
-            {(l7Protocol === 'all' || l7Protocol === 'DNS') && (
+            {(l7Protocol === 'all' || l7Protocol === 'DNS') && hasDNSQueries && (
               <div>
                 <div className="text-[10px] text-theme-text-tertiary mb-1">DNS Query</div>
                 <Input
@@ -408,7 +423,8 @@ export const TrafficFilterSidebar = memo(function TrafficFilterSidebar({
               </div>
             )}
 
-            {/* Verdict (always visible — applies to all protocols) */}
+            {/* Verdict, limited to the verdicts the data actually contains. */}
+            {availableVerdicts.length > 0 && (
             <div>
               <div className="text-[10px] text-theme-text-tertiary mb-1">Verdict</div>
               <div className="flex flex-wrap gap-1">
@@ -416,7 +432,7 @@ export const TrafficFilterSidebar = memo(function TrafficFilterSidebar({
                   { label: 'forwarded', active: SEVERITY_BADGE.success },
                   { label: 'dropped', active: SEVERITY_BADGE.error },
                   { label: 'error', active: SEVERITY_BADGE.warning },
-                ] as const).map(({ label, active }) => (
+                ] as const).filter(({ label }) => availableVerdicts.includes(label)).map(({ label, active }) => (
                   <button
                     key={label}
                     onClick={() => onToggleL7Verdict(label)}
@@ -432,6 +448,7 @@ export const TrafficFilterSidebar = memo(function TrafficFilterSidebar({
                 ))}
               </div>
             </div>
+            )}
           </div>
         )}
 

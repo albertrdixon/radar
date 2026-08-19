@@ -110,10 +110,40 @@ func (b *Builder) Build(opts BuildOptions) (*Topology, error) {
 // (exposed so callers — eg. the SSE broadcaster — can drive debounce / render-mode
 // decisions off the same signal that drives the in-builder optimizations here).
 func (b *Builder) detectLargeClusterAndOptimize(opts *BuildOptions) (bool, []string, int) {
+	estimatedNodes := b.estimateNodeCount(opts)
+	var hiddenKinds []string
+
+	// Check if large cluster
+	if estimatedNodes < LargeClusterThreshold {
+		return false, nil, estimatedNodes
+	}
+
+	// Large cluster detected - apply optimizations
+	log.Printf("INFO [topology] Large cluster detected (%d estimated nodes >= %d threshold), applying optimizations", estimatedNodes, LargeClusterThreshold)
+
+	// 1. More aggressive pod grouping (threshold 2 instead of 5)
+	opts.MaxIndividualPods = 2
+
+	// 2. Auto-hide ConfigMaps and PVCs
+	if opts.IncludeConfigMaps {
+		opts.IncludeConfigMaps = false
+		hiddenKinds = append(hiddenKinds, "ConfigMap")
+	}
+	if opts.IncludePVCs {
+		opts.IncludePVCs = false
+		hiddenKinds = append(hiddenKinds, "PersistentVolumeClaim")
+	}
+
+	return true, hiddenKinds, estimatedNodes
+}
+
+// estimateNodeCount counts the resources that contribute most to the graph, in
+// the scope opts selects. Read-only, so the caller decides what to do with the
+// number before anything mutates opts.
+func (b *Builder) estimateNodeCount(opts *BuildOptions) int {
 	// Quick count of workload resources to estimate total node count
 	// This is a lightweight check - we count core resources that contribute most to topology
 	estimatedNodes := 0
-	var hiddenKinds []string
 
 	// Count deployments
 	if deployments, _ := b.provider.Deployments(); deployments != nil {
@@ -210,28 +240,7 @@ func (b *Builder) detectLargeClusterAndOptimize(opts *BuildOptions) (bool, []str
 		}
 	}
 
-	// Check if large cluster
-	if estimatedNodes < LargeClusterThreshold {
-		return false, nil, estimatedNodes
-	}
-
-	// Large cluster detected - apply optimizations
-	log.Printf("INFO [topology] Large cluster detected (%d estimated nodes >= %d threshold), applying optimizations", estimatedNodes, LargeClusterThreshold)
-
-	// 1. More aggressive pod grouping (threshold 2 instead of 5)
-	opts.MaxIndividualPods = 2
-
-	// 2. Auto-hide ConfigMaps and PVCs
-	if opts.IncludeConfigMaps {
-		opts.IncludeConfigMaps = false
-		hiddenKinds = append(hiddenKinds, "ConfigMap")
-	}
-	if opts.IncludePVCs {
-		opts.IncludePVCs = false
-		hiddenKinds = append(hiddenKinds, "PersistentVolumeClaim")
-	}
-
-	return true, hiddenKinds, estimatedNodes
+	return estimatedNodes
 }
 
 // workloadRefKey identifies a referenced ConfigMap/Secret/PVC by namespace and
@@ -3695,10 +3704,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 			sel, selErr := metav1.LabelSelectorAsSelector(pdb.Spec.Selector)
 			if selErr == nil {
 				// Check Deployments
-				for _, d := range deployments {
-					if d.Namespace != pdb.Namespace {
-						continue
-					}
+				for _, d := range deploymentsByNS[pdb.Namespace] {
 					if sel.Matches(labels.Set(d.Spec.Template.Labels)) {
 						targetID := deploymentIDs[d.Namespace+"/"+d.Name]
 						if targetID != "" {
@@ -3712,10 +3718,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 					}
 				}
 				// Check StatefulSets
-				for _, s := range statefulsets {
-					if s.Namespace != pdb.Namespace {
-						continue
-					}
+				for _, s := range statefulsetsByNS[pdb.Namespace] {
 					if sel.Matches(labels.Set(s.Spec.Template.Labels)) {
 						targetID := statefulSetIDs[s.Namespace+"/"+s.Name]
 						if targetID != "" {
@@ -3729,10 +3732,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 					}
 				}
 				// Check DaemonSets
-				for _, d := range daemonsets {
-					if d.Namespace != pdb.Namespace {
-						continue
-					}
+				for _, d := range daemonsetsByNS[pdb.Namespace] {
 					if sel.Matches(labels.Set(d.Spec.Template.Labels)) {
 						dsID := fmt.Sprintf("daemonset/%s/%s", d.Namespace, d.Name)
 						edges = append(edges, Edge{
@@ -3791,10 +3791,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 			continue
 		}
 
-		for _, d := range deployments {
-			if d.Namespace != np.Namespace {
-				continue
-			}
+		for _, d := range deploymentsByNS[np.Namespace] {
 			if sel.Matches(labels.Set(d.Spec.Template.Labels)) {
 				if targetID := deploymentIDs[d.Namespace+"/"+d.Name]; targetID != "" {
 					edges = append(edges, Edge{
@@ -3806,10 +3803,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 				}
 			}
 		}
-		for _, s := range statefulsets {
-			if s.Namespace != np.Namespace {
-				continue
-			}
+		for _, s := range statefulsetsByNS[np.Namespace] {
 			if sel.Matches(labels.Set(s.Spec.Template.Labels)) {
 				if targetID := statefulSetIDs[s.Namespace+"/"+s.Name]; targetID != "" {
 					edges = append(edges, Edge{
@@ -3821,10 +3815,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 				}
 			}
 		}
-		for _, d := range daemonsets {
-			if d.Namespace != np.Namespace {
-				continue
-			}
+		for _, d := range daemonsetsByNS[np.Namespace] {
 			if sel.Matches(labels.Set(d.Spec.Template.Labels)) {
 				dsID := fmt.Sprintf("daemonset/%s/%s", d.Namespace, d.Name)
 				edges = append(edges, Edge{
@@ -3878,10 +3869,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 				continue
 			}
 
-			for _, d := range deployments {
-				if d.Namespace != ns {
-					continue
-				}
+			for _, d := range deploymentsByNS[ns] {
 				if matchesStringMap(d.Spec.Template.Labels, selectorMap) {
 					if targetID := deploymentIDs[d.Namespace+"/"+d.Name]; targetID != "" {
 						edges = append(edges, Edge{
@@ -3890,10 +3878,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 					}
 				}
 			}
-			for _, s := range statefulsets {
-				if s.Namespace != ns {
-					continue
-				}
+			for _, s := range statefulsetsByNS[ns] {
 				if matchesStringMap(s.Spec.Template.Labels, selectorMap) {
 					if targetID := statefulSetIDs[s.Namespace+"/"+s.Name]; targetID != "" {
 						edges = append(edges, Edge{
@@ -3902,10 +3887,7 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 					}
 				}
 			}
-			for _, d := range daemonsets {
-				if d.Namespace != ns {
-					continue
-				}
+			for _, d := range daemonsetsByNS[ns] {
 				if matchesStringMap(d.Spec.Template.Labels, selectorMap) {
 					dsID := fmt.Sprintf("daemonset/%s/%s", d.Namespace, d.Name)
 					edges = append(edges, Edge{
@@ -3978,7 +3960,16 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		}
 	}
 
-	// 11g. Add VPA nodes (CRD - fetched via dynamic cache)
+	// 11g. Add Calico NetworkPolicy variants. Calico's namespaced and global
+	// policies share Kind names with the core NetworkPolicy, so they use
+	// topology pseudo-kinds and retain apiVersion for group-aware navigation.
+	nodes, edges = b.addCalicoPolicyNodes(
+		nodes, edges, opts, &warnings,
+		deployments, statefulsets, daemonsets,
+		deploymentIDs, statefulSetIDs,
+	)
+
+	// 11h. Add VPA nodes (CRD - fetched via dynamic cache)
 	var vpaGVR schema.GroupVersionResource
 	hasVPAs := false
 	if resourceDiscovery != nil {
@@ -8336,8 +8327,14 @@ func (b *Builder) addGenericCRDNodes(nodes []Node, edges []Edge, opts BuildOptio
 		}
 		kindLower := strings.ToLower(kind)
 
-		// Skip if already processed or not a CRD
+		// Skip if already processed or not a CRD. Calico's policy kinds are
+		// skipped by group rather than by name, so another CNI's CRD of the same
+		// name still reaches this path. It renders as a generic node like any
+		// other CRD — which is what it got before Calico was handled here.
 		if processedKinds[kindLower] {
+			continue
+		}
+		if isCalicoPolicyGVR(gvr) {
 			continue
 		}
 		if !resourceDiscovery.IsCRD(kind) {
@@ -8438,8 +8435,7 @@ func (b *Builder) addGenericCRDNodes(nodes []Node, edges []Edge, opts BuildOptio
 }
 
 // annotateNodePolicyCoverage adds "policyStatus" to workload node Data
-// indicating whether the workload is selected by at least one network policy
-// (standard NetworkPolicy, CiliumNetworkPolicy, or ClusterNetworkPolicy).
+// indicating whether the workload is selected by at least one network policy.
 // Uses EdgeProtects edges — these are already computed for all policy types.
 // Also checks standard NetworkPolicies with empty selectors (matchesAllPods)
 // which don't create edges but still protect workloads.
@@ -8454,7 +8450,7 @@ func annotateNodePolicyCoverage(
 	// Collect workloads covered by EdgeProtects edges (from any policy type)
 	coveredWorkloads := make(map[string]bool)
 	for _, e := range edges {
-		if e.Type == EdgeProtects {
+		if e.Type == EdgeProtects && !e.Partial {
 			coveredWorkloads[e.Target] = true
 		}
 	}
@@ -8481,9 +8477,13 @@ func annotateNodePolicyCoverage(
 		}
 	}
 
-	// Check CiliumNetworkPolicy/CiliumClusterwideNetworkPolicy nodes with matchesAllPods flag
+	// Check policy nodes with matchesAllPods flag.
 	for _, n := range nodes {
-		if (n.Kind == KindCiliumNetworkPolicy || n.Kind == KindCiliumClusterwideNetworkPolicy) && n.Data["matchesAllPods"] == true {
+		if n.Kind == KindCalicoStagedNetworkPolicy || n.Kind == KindCalicoStagedGlobalNetworkPolicy || n.Kind == KindCalicoStagedKubernetesNetworkPolicy {
+			continue
+		}
+		if (n.Kind == KindCiliumNetworkPolicy || n.Kind == KindCiliumClusterwideNetworkPolicy ||
+			n.Kind == KindCalicoNetworkPolicy || n.Kind == KindCalicoGlobalNetworkPolicy) && n.Data["matchesAllPods"] == true {
 			ns, _ := n.Data["namespace"].(string)
 			for _, d := range deployments {
 				if ns == "" || d.Namespace == ns {
@@ -8499,6 +8499,11 @@ func annotateNodePolicyCoverage(
 				if ns == "" || d.Namespace == ns {
 					coveredWorkloads[fmt.Sprintf("daemonset/%s/%s", d.Namespace, d.Name)] = true
 				}
+			}
+		}
+		if coverage, ok := n.Data["policyCoverageWorkloads"].([]string); ok {
+			for _, workloadID := range coverage {
+				coveredWorkloads[workloadID] = true
 			}
 		}
 	}

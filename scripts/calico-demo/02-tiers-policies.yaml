@@ -1,0 +1,95 @@
+# A non-default tier. Calico requires policies in one to be named
+# "<tier>.<name>", which is why the policy below is security.baseline rather
+# than baseline.
+apiVersion: projectcalico.org/v3
+kind: Tier
+metadata:
+  name: security
+spec:
+  order: 100
+---
+# Plain equality selector plus an explicit Deny, so the rule list has both
+# actions to render.
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: api-lockdown
+  namespace: calico-demo
+spec:
+  selector: app == 'api'
+  types: ["Ingress", "Egress"]
+  ingress:
+    - action: Allow
+      protocol: TCP
+      source:
+        selector: app == 'web'
+      destination:
+        ports: [80]
+    - action: Deny
+      source: {}
+  egress:
+    - action: Allow
+      destination:
+        nets: ["10.0.0.0/8"]
+---
+# all() endpoints narrowed by a serviceAccountSelector. Evaluating only the
+# endpoint selector here would cover every workload in the namespace instead of
+# the one whose ServiceAccount carries the label.
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: sa-scoped
+  namespace: calico-demo
+spec:
+  selector: all()
+  serviceAccountSelector: team == 'payments'
+  types: ["Ingress"]
+  ingress:
+    - action: Allow
+---
+# The only policy selecting db, so a staged deletion of it removes that
+# workload's coverage entirely and the projected figure has to fall.
+apiVersion: projectcalico.org/v3
+kind: NetworkPolicy
+metadata:
+  name: db-lockdown
+  namespace: calico-demo
+spec:
+  selector: app == 'db'
+  types: ["Ingress"]
+  ingress:
+    - action: Allow
+      protocol: TCP
+      source:
+        selector: app == 'api'
+      destination:
+        ports: [5432]
+---
+# Set membership plus a namespaceSelector. Cluster-scoped, so it reaches every
+# namespace unless the namespaceSelector is honoured — calico-demo-dev/dev-web
+# matches the endpoint selector and must still be excluded.
+apiVersion: projectcalico.org/v3
+kind: GlobalNetworkPolicy
+metadata:
+  name: prod-default-deny
+spec:
+  selector: tier in {'frontend','backend'}
+  namespaceSelector: env == 'prod'
+  types: ["Egress"]
+  egress:
+    - action: Deny
+      destination:
+        nets: ["0.0.0.0/0"]
+---
+# In the non-default tier, with a Pass action and a compound selector.
+apiVersion: projectcalico.org/v3
+kind: GlobalNetworkPolicy
+metadata:
+  name: security.baseline
+spec:
+  tier: security
+  order: 10
+  selector: app == 'web' && tier == 'frontend'
+  types: ["Ingress"]
+  ingress:
+    - action: Pass

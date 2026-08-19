@@ -66,7 +66,7 @@ var catalogOrder = []Category{
 	// Storage
 	CategoryPVCPending, CategoryPVCLost, CategoryPVFailed, CategoryPVCResizeFailed,
 	CategoryVolumeMountFailed, CategoryVolumeAccessModeConflict,
-	CategoryBackupFailed, CategoryBackupTargetUnavailable,
+	CategoryBackupFailed, CategoryBackupTargetUnavailable, CategoryBackupStalled,
 	// Scaling
 	CategoryRolloutStalled, CategoryHPALimitedOrFailed,
 	// Security
@@ -130,6 +130,7 @@ var categoryDescription = map[Category]string{
 	CategoryVolumeAccessModeConflict: "A volume's access mode conflicts with how it's mounted (e.g. an RWO volume claimed by pods on different nodes).",
 	CategoryBackupFailed:             "A backup or restore run failed, partially failed, or was rejected in validation, or a database's continuous archiving has stopped — the recovery point you'd expect to have may not exist.",
 	CategoryBackupTargetUnavailable:  "The backup destination itself is unhealthy — an object-store location or backup repository the backup tool can't reach or validate.",
+	CategoryBackupStalled:            "A backup or restore run is still in flight long past the time its own tool allows, so nothing appears to be advancing it — it has neither succeeded nor failed, and no new recovery point is being written.",
 	// Scaling
 	CategoryRolloutStalled:     "A workload rollout is stuck — the new revision isn't progressing (progressDeadlineExceeded).",
 	CategoryHPALimitedOrFailed: "A HorizontalPodAutoscaler can't scale — missing metrics, pinned at max replicas, or scaling errors.",

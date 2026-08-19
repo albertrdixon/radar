@@ -1,6 +1,7 @@
 package k8s
 
 import (
+	"maps"
 	"sync"
 	"time"
 
@@ -12,6 +13,58 @@ import (
 	fakeclientset "k8s.io/client-go/kubernetes/fake"
 )
 
+// InitLoadTestResourceCache creates a resource cache from a fake client using
+// the live path's deferred-informer split, so the critical/deferred phases and
+// the warmup window they drive actually exist. InitTestResourceCache syncs
+// everything at once, which is what unit tests want and makes it useless for
+// measuring anything that depends on startup phases.
+//
+// Intended for load-test harnesses, not unit tests.
+func InitLoadTestResourceCache(client kubernetes.Interface) error {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+
+	enabled := allTestResourceTypes()
+	deferred := make(map[string]bool, len(deferredResources))
+	maps.Copy(deferred, deferredResources)
+
+	secretWriteTimes := newSecretDataManagerWriteIndex()
+	cronJobScheduleObservations := newCronJobScheduleObservationTracker()
+	cfg := k8score.CacheConfig{
+		Client:        client,
+		ResourceTypes: enabled,
+		DeferredTypes: deferred,
+		OnTransform: func(obj any) {
+			secretWriteTimes.capture(obj)
+		},
+		OnObservedChange: func(change k8score.ResourceChange, obj, _ any) {
+			secretWriteTimes.reconcile(change, obj)
+			if cj, ok := obj.(*batchv1.CronJob); ok {
+				cronJobScheduleObservations.observe(change.Operation, cj)
+			}
+		},
+	}
+
+	core, err := k8score.NewResourceCache(cfg)
+	if err != nil {
+		return err
+	}
+
+	initialSyncComplete = core.IsSyncComplete()
+
+	resourceCache = &ResourceCache{
+		ResourceCache:               core,
+		secretsEnabled:              true,
+		cronJobScheduleObservations: cronJobScheduleObservations,
+		secretWriteTimes:            secretWriteTimes,
+	}
+
+	cacheOnce = new(sync.Once)
+	cacheOnce.Do(func() {})
+
+	return nil
+}
+
 // InitTestResourceCache creates a resource cache from a fake or test client,
 // bypassing RBAC checks and the normal Initialize/InitResourceCache flow.
 // All resource types are enabled. Call ResetTestState to clean up.
@@ -21,36 +74,7 @@ func InitTestResourceCache(client kubernetes.Interface) error {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
 
-	enabled := map[string]bool{
-		"pods":                     true,
-		"services":                 true,
-		"deployments":              true,
-		"daemonsets":               true,
-		"statefulsets":             true,
-		"replicasets":              true,
-		"ingresses":                true,
-		"configmaps":               true,
-		"secrets":                  true,
-		"events":                   true,
-		"persistentvolumeclaims":   true,
-		"resourcequotas":           true,
-		"nodes":                    true,
-		"namespaces":               true,
-		"jobs":                     true,
-		"cronjobs":                 true,
-		"horizontalpodautoscalers": true,
-		"persistentvolumes":        true,
-		"storageclasses":           true,
-		"poddisruptionbudgets":     true,
-		"roles":                    true,
-		"clusterroles":             true,
-		"rolebindings":             true,
-		"clusterrolebindings":      true,
-		"serviceaccounts":          true,
-		"ingressclasses":           true,
-		"networkpolicies":          true,
-		"limitranges":              true,
-	}
+	enabled := allTestResourceTypes()
 
 	secretWriteTimes := newSecretDataManagerWriteIndex()
 	cronJobScheduleObservations := newCronJobScheduleObservationTracker()
@@ -278,4 +302,38 @@ func ResetTestState() {
 
 	// Reset operation context so stale cancellations don't leak between tests
 	CancelOngoingOperations()
+}
+
+// allTestResourceTypes enables every kind the typed cache knows about.
+func allTestResourceTypes() map[string]bool {
+	return map[string]bool{
+		"pods":                     true,
+		"services":                 true,
+		"deployments":              true,
+		"daemonsets":               true,
+		"statefulsets":             true,
+		"replicasets":              true,
+		"ingresses":                true,
+		"configmaps":               true,
+		"secrets":                  true,
+		"events":                   true,
+		"persistentvolumeclaims":   true,
+		"resourcequotas":           true,
+		"nodes":                    true,
+		"namespaces":               true,
+		"jobs":                     true,
+		"cronjobs":                 true,
+		"horizontalpodautoscalers": true,
+		"persistentvolumes":        true,
+		"storageclasses":           true,
+		"poddisruptionbudgets":     true,
+		"roles":                    true,
+		"clusterroles":             true,
+		"rolebindings":             true,
+		"clusterrolebindings":      true,
+		"serviceaccounts":          true,
+		"ingressclasses":           true,
+		"networkpolicies":          true,
+		"limitranges":              true,
+	}
 }

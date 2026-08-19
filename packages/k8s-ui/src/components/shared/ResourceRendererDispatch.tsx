@@ -65,7 +65,7 @@ import {
 } from '../resources/resource-utils-kyverno-exceptions'
 import { getResourceClaimStatus, getResourceClaimTemplateStatus, getDeviceClassStatus, getResourceSliceStatus } from '../resources/resource-utils-dra'
 import { getNvidiaClusterPolicyStatus, getNvidiaDriverStatus } from '../resources/resource-utils-nvidia'
-import { getBackupStatus, getRestoreStatus, getScheduleStatus, getBSLStatus, isVeleroResource } from '../resources/resource-utils-velero'
+import { getBackupStatus, getRestoreStatus, getScheduleStatus, getBSLStatus, getBackupRepositoryStatus, isVeleroResource } from '../resources/resource-utils-velero'
 import {
   getVirtualServiceStatus,
   getDestinationRuleStatus,
@@ -81,6 +81,12 @@ import {
   getRevisionStatus,
 } from '../resources/resource-utils-knative'
 import { getHTTPProxyStatus } from '../resources/resource-utils-contour'
+import {
+  isCalicoApiVersion,
+  isCalicoPolicyKind,
+  isCalicoStagedKubernetesNetworkPolicyKind,
+  isCoreNetworkPolicyKind,
+} from '../resources/resource-utils-calico'
 import { getClusterStatus as getCAPIClusterStatus, getMachineStatus, getMachineDeploymentStatus, getMachineSetStatus, getMachinePoolStatus, getKCPStatus, getClusterClassStatus, getMachineHealthCheckStatus } from '../resources/resource-utils-capi'
 import { getAWSMCPStatus, getAWSMMPStatus, getAWSMachineStatus, getAWSManagedClusterStatus } from '../resources/resource-utils-aws-capi'
 import { getGCPMCPStatus, getGCPMMPStatus, getGCPMachineStatus, getGCPManagedClusterStatus } from '../resources/resource-utils-gcp-capi'
@@ -173,6 +179,7 @@ import {
   VeleroRestoreRenderer,
   VeleroScheduleRenderer,
   VeleroBSLRenderer,
+  VeleroBackupRepositoryRenderer,
   VeleroVSLRenderer,
   CNPGClusterRenderer,
   CNPGBackupRenderer,
@@ -251,6 +258,10 @@ import {
   ResourceSliceRenderer,
   NvidiaClusterPolicyRenderer,
   NvidiaDriverRenderer,
+  CalicoHostEndpointRenderer,
+  CalicoIPPoolRenderer,
+  CalicoNetworkPolicyRenderer,
+  CalicoTierRenderer,
 } from '../resources/renderers'
 import type { ComposedRefStatus } from '../resources/renderers/CompositeRenderer'
 import {
@@ -326,6 +337,17 @@ export interface RendererOverrides {
     data: any
     onNavigate?: (ref: ResourceRef) => void
   }>
+  /** Host-injected: adds the Backups-stored-here lookup to a storage location. */
+  VeleroBSLRenderer?: React.ComponentType<{
+    data: any
+    onNavigate?: (ref: ResourceRef) => void
+  }>
+  /** Host-injected: adds the storage location's health to a backup, and the
+   *  on-demand fetch for the messages behind its error/warning counts. */
+  VeleroBackupRenderer?: React.ComponentType<{ data: any; onNavigate?: (ref: ResourceRef) => void }>
+  /** Host-injected: adds the on-demand fetch for the messages behind a
+   *  restore's error and warning counts. */
+  VeleroRestoreRenderer?: React.ComponentType<{ data: any; onNavigate?: (ref: ResourceRef) => void }>
   // Kyverno policy coverage: the host fetches /api/policy/policies/... and
   // renders the section, which the policy renderers accept as a slot. One
   // override serves all six policy renderers — they differ in what the policy
@@ -395,6 +417,10 @@ const KNOWN_KINDS = new Set([
   'orders', 'challenges',
   'gateways', 'gatewayclasses', 'httproutes', 'grpcroutes', 'tcproutes', 'tlsroutes', 'sealedsecrets', 'workflowtemplates', 'clusterworkflowtemplates',
   'networkpolicies', 'networkpolicy',
+  'globalnetworkpolicies', 'globalnetworkpolicy',
+  'stagednetworkpolicies', 'stagednetworkpolicy',
+  'stagedglobalnetworkpolicies', 'stagedglobalnetworkpolicy',
+  'stagedkubernetesnetworkpolicies', 'stagedkubernetesnetworkpolicy',
   'ciliumnetworkpolicies', 'ciliumnetworkpolicy', 'ciliumclusterwidenetworkpolicies', 'ciliumclusterwidenetworkpolicy',
   'clusternetworkpolicies', 'clusternetworkpolicy',
   'poddisruptionbudgets', 'serviceaccounts', 'namespaces',
@@ -418,12 +444,14 @@ const KNOWN_KINDS = new Set([
   'policyexceptions', 'cleanuppolicies', 'clustercleanuppolicies',
   'resourceclaims', 'resourceclaimtemplates', 'deviceclasses', 'resourceslices',
   'nvidiadrivers',
+  'hostendpoints', 'ippools', 'tiers',
   'vulnerabilityreports', 'configauditreports', 'exposedsecretreports',
   'rbacassessmentreports', 'clusterrbacassessmentreports',
   'clustercompliancereports', 'sbomreports', 'clustersbomreports',
   'infraassessmentreports', 'clusterinfraassessmentreports',
   'verticalpodautoscalers',
   'backups', 'restores', 'schedules', 'backupstoragelocations', 'volumesnapshotlocations',
+  'backuprepositories',
   'externalsecrets', 'clusterexternalsecrets', 'secretstores', 'clustersecretstores',
   'clusters', 'scheduledbackups', 'poolers', 'objectstores',
   'globalcontextentries', 'updaterequests', 'ephemeralreports', 'clusterephemeralreports',
@@ -599,6 +627,7 @@ export function ResourceRendererDispatch({
   const isVeleroCollisionGatedKind =
     kind === 'restores' || kind === 'schedules'
     || kind === 'backupstoragelocations' || kind === 'volumesnapshotlocations'
+    || kind === 'backuprepositories'
   const veleroCollisionFallthrough = isVeleroCollisionGatedKind && !isVeleroResource(data)
 
   // Same rule as the Crossplane block above, for the plurals shared by two
@@ -631,6 +660,18 @@ export function ResourceRendererDispatch({
     || (kind === 'policies' && isApiGroup(data?.apiVersion, 'kyverno.io'))
   const groupGatedFallthrough = isGroupGatedKind && !groupGatedMatched
 
+  const calicoApiVersionMatched = isCalicoApiVersion(data?.apiVersion)
+  const isCalicoPolicy = isCalicoPolicyKind(kind) && calicoApiVersionMatched
+  const isCalicoStagedKubernetesPolicy =
+    isCalicoPolicy && isCalicoStagedKubernetesNetworkPolicyKind(kind)
+  const isCoreNetworkPolicy = isCoreNetworkPolicyKind(kind, data?.apiVersion, resource.group)
+  const isCalicoHostEndpoint = kind === 'hostendpoints' && calicoApiVersionMatched
+  const isCalicoIPPool = kind === 'ippools' && calicoApiVersionMatched
+  const isCalicoTier = kind === 'tiers' && calicoApiVersionMatched
+  const calicoCollisionFallthrough = (
+    isCalicoPolicyKind(kind) || kind === 'hostendpoints' || kind === 'ippools' || kind === 'tiers'
+  ) && !isCoreNetworkPolicy && !((isCalicoPolicy || isCalicoHostEndpoint || isCalicoIPPool || isCalicoTier))
+
   const isKnownKind = KNOWN_KINDS.has(kind) || isCrossplaneMR || isCrossplaneClaim || isCrossplaneXR
 
   const PodComp = rendererOverrides?.PodRenderer ?? PodRenderer
@@ -645,6 +686,9 @@ export function ResourceRendererDispatch({
   const CNPGPublicationComp = rendererOverrides?.CNPGPublicationRenderer ?? CNPGPublicationRenderer
   const CNPGSubscriptionComp = rendererOverrides?.CNPGSubscriptionRenderer ?? CNPGSubscriptionRenderer
   const CNPGObjectStoreComp = rendererOverrides?.CNPGObjectStoreRenderer ?? CNPGObjectStoreRenderer
+  const VeleroBSLComp = rendererOverrides?.VeleroBSLRenderer ?? VeleroBSLRenderer
+  const VeleroBackupComp = rendererOverrides?.VeleroBackupRenderer ?? VeleroBackupRenderer
+  const VeleroRestoreComp = rendererOverrides?.VeleroRestoreRenderer ?? VeleroRestoreRenderer
   const KyvernoCoverageComp = rendererOverrides?.KyvernoPolicyCoverage
   const kyvernoCoverage = KyvernoCoverageComp ? (
     <KyvernoCoverageComp data={data} onNavigate={onNavigate} />
@@ -716,7 +760,9 @@ export function ResourceRendererDispatch({
         {kind === 'tlsroutes' && <SimpleRouteRenderer data={data} kind="TLSRoute" onNavigate={onNavigate} />}
         {kind === 'sealedsecrets' && <SealedSecretRenderer data={data} onNavigate={onNavigate} />}
         {(kind === 'workflowtemplates' || kind === 'clusterworkflowtemplates') && <WorkflowTemplateRenderer data={data} />}
-        {(kind === 'networkpolicies' || kind === 'networkpolicy') && <NetworkPolicyRenderer data={data} />}
+        {isCoreNetworkPolicy && <NetworkPolicyRenderer data={data} />}
+        {isCalicoStagedKubernetesPolicy && <NetworkPolicyRenderer data={data} staged />}
+        {isCalicoPolicy && !isCalicoStagedKubernetesPolicy && <CalicoNetworkPolicyRenderer data={data} onNavigate={onNavigate} />}
         {(kind === 'ciliumnetworkpolicies' || kind === 'ciliumnetworkpolicy' || kind === 'ciliumclusterwidenetworkpolicies' || kind === 'ciliumclusterwidenetworkpolicy') && <CiliumNetworkPolicyRenderer data={data} />}
         {(kind === 'clusternetworkpolicies' || kind === 'clusternetworkpolicy') && <ClusterNetworkPolicyRenderer data={data} />}
         {kind === 'poddisruptionbudgets' && <PodDisruptionBudgetRenderer data={data} />}
@@ -766,6 +812,9 @@ export function ResourceRendererDispatch({
         {policyExceptionMatched && <KyvernoPolicyExceptionRenderer data={data} />}
         {kyvernoLegacyExtraMatched && <KyvernoCleanupPolicyRenderer data={data} />}
         {kind === 'nvidiadrivers' && <NvidiaDriverRenderer data={data} />}
+        {isCalicoHostEndpoint && <CalicoHostEndpointRenderer data={data} onNavigate={onNavigate} />}
+        {isCalicoIPPool && <CalicoIPPoolRenderer data={data} />}
+        {isCalicoTier && <CalicoTierRenderer data={data} />}
         {/* DRA (resource.k8s.io) */}
         {kind === 'resourceclaims' && <ResourceClaimRenderer data={data} onNavigate={onNavigate} />}
         {kind === 'resourceclaimtemplates' && <ResourceClaimTemplateRenderer data={data} />}
@@ -777,10 +826,11 @@ export function ResourceRendererDispatch({
         {kind === 'subscriptions' && isApiGroup(data.apiVersion, CNPG_GROUP) && <CNPGSubscriptionComp data={data} onNavigate={onNavigate} />}
         {(kind === 'imagecatalogs' || kind === 'clusterimagecatalogs') && isApiGroup(data.apiVersion, CNPG_GROUP) && <CNPGImageCatalogComp data={data} onNavigate={onNavigate} />}
         {kind === 'backups' && isApiGroup(data.apiVersion, CNPG_GROUP) && <CNPGBackupRenderer data={data} onNavigate={onNavigate} />}
-        {kind === 'backups' && isApiGroup(data.apiVersion, 'velero.io') && <VeleroBackupRenderer data={data} />}
-        {kind === 'restores' && isVeleroResource(data) && <VeleroRestoreRenderer data={data} />}
-        {kind === 'schedules' && isVeleroResource(data) && <VeleroScheduleRenderer data={data} />}
-        {kind === 'backupstoragelocations' && isVeleroResource(data) && <VeleroBSLRenderer data={data} />}
+        {kind === 'backups' && isApiGroup(data.apiVersion, 'velero.io') && <VeleroBackupComp data={data} onNavigate={onNavigate} />}
+        {kind === 'restores' && isVeleroResource(data) && <VeleroRestoreComp data={data} onNavigate={onNavigate} />}
+        {kind === 'schedules' && isVeleroResource(data) && <VeleroScheduleRenderer data={data} onNavigate={onNavigate} />}
+        {kind === 'backupstoragelocations' && isVeleroResource(data) && <VeleroBSLComp data={data} onNavigate={onNavigate} />}
+        {kind === 'backuprepositories' && isVeleroResource(data) && <VeleroBackupRepositoryRenderer data={data} onNavigate={onNavigate} />}
         {kind === 'volumesnapshotlocations' && isVeleroResource(data) && <VeleroVSLRenderer data={data} />}
         {kind === 'externalsecrets' && <ExternalSecretRenderer data={data} onNavigate={onNavigate} />}
         {kind === 'clusterexternalsecrets' && <ClusterExternalSecretRenderer data={data} onNavigate={onNavigate} />}
@@ -884,7 +934,7 @@ export function ResourceRendererDispatch({
             for known-plural collisions where no apiVersion-gated renderer
             matched (e.g. a Knative Configuration sharing the `configurations`
             plural with Crossplane Configuration). */}
-        {(!isKnownKind || crossplaneCollisionFallthrough || kyvernoCollisionFallthrough || veleroCollisionFallthrough || groupGatedFallthrough) && <GenericRenderer data={data} />}
+        {(!isKnownKind || crossplaneCollisionFallthrough || kyvernoCollisionFallthrough || veleroCollisionFallthrough || groupGatedFallthrough || calicoCollisionFallthrough) && <GenericRenderer data={data} />}
 
         {/* Common sections - can be disabled when parent handles them separately */}
         {showCommonSections && (
@@ -1049,6 +1099,12 @@ export function getResourceStatus(kind: string, data: any): { text: string; colo
   if (k === 'restores' && isVeleroResource(data)) return getRestoreStatus(data)
   if (k === 'schedules' && isVeleroResource(data)) return getScheduleStatus(data)
   if (k === 'backupstoragelocations' && isVeleroResource(data)) return getBSLStatus(data)
+  // Repositories have table columns and raise their own issue, but had no branch
+  // here — so the drawer header fell through to the raw phase and showed
+  // "NotReady" beside a table cell reading "Not ready". Same object, two
+  // spellings. Deliberately NOT added to KNOWN_KINDS: there is no detail
+  // renderer for this kind, and listing it there suppresses GenericRenderer.
+  if (k === 'backuprepositories' && isVeleroResource(data)) return getBackupRepositoryStatus(data)
   if (k === 'externalsecrets') return getExternalSecretStatus(data)
   if (k === 'clusterexternalsecrets') return getClusterExternalSecretStatus(data)
   if (k === 'secretstores') return getSecretStoreStatus(data)

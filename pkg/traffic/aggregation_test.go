@@ -159,6 +159,11 @@ func TestAggregateFlows_LatencyOnlyFromResponses(t *testing.T) {
 	if agg.LatencyP50Ms != 5.0 {
 		t.Errorf("LatencyP50Ms = %.2f, want 5.0 (only RESPONSE latency counted)", agg.LatencyP50Ms)
 	}
+	// P50 of [5, 999] is also 5, so assert the mean too — otherwise this test
+	// passes whether or not the request record was excluded.
+	if agg.AvgLatencyMs != 5.0 {
+		t.Errorf("AvgLatencyMs = %.2f, want 5.0: a request record carries no measurement", agg.AvgLatencyMs)
+	}
 }
 
 func TestAggregateFlows_HTTPStatusDistribution(t *testing.T) {

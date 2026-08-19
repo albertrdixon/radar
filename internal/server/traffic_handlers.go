@@ -114,19 +114,42 @@ func (s *Server) handleGetTrafficFlows(w http.ResponseWriter, r *http.Request) {
 		flows = kept
 	}
 
-	// Aggregate flows by service pair
-	aggregated := traffic.AggregateFlows(flows)
+	s.writeJSON(w, trafficFlowsPayload(response, flows))
+}
 
+// trafficFlowsPayload shapes the flows response. Split out so it can be tested
+// directly: the payload is hand-built rather than marshalled from a struct, so a
+// field the source sets is easy to drop here without anything failing.
+func trafficFlowsPayload(response *traffic.FlowsResponse, flows []traffic.Flow) map[string]any {
 	result := map[string]any{
 		"source":     response.Source,
 		"timestamp":  response.Timestamp,
 		"flows":      flows,
-		"aggregated": aggregated,
+		"aggregated": traffic.AggregateFlows(flows),
 	}
+
+	// A partial-data warning qualifies the flows it came with. If the namespace
+	// filtering above removed all of them, it now qualifies nothing this user can
+	// see — and describing the shape of edges they have no access to is both
+	// confusing and more than they asked. A source that returned no flows in the
+	// first place is different: there the warning is the explanation for the empty
+	// result, which is exactly what it is for.
+	filteredEverythingOut := len(flows) == 0 && len(response.Flows) > 0
+	if response.WarningKind == traffic.WarningPartial && filteredEverythingOut {
+		return result
+	}
+
 	if response.Warning != "" {
 		result["warning"] = response.Warning
+		// The kind has to travel with the warning: the client retries a transient
+		// one and must not retry a permanent one, and an absent kind is read as
+		// transient — so dropping it here turns a standing explanation into an
+		// endless retry loop.
+		if response.WarningKind != "" {
+			result["warningKind"] = response.WarningKind
+		}
 	}
-	s.writeJSON(w, result)
+	return result
 }
 
 // handleTrafficFlowsStream provides SSE stream of traffic flows

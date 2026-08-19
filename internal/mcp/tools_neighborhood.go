@@ -141,6 +141,11 @@ func handleGetNeighborhood(ctx context.Context, req *mcp.CallToolRequest, input 
 	}
 
 	sub := topology.BuildNeighborhoodWithIndex(topo, root, opts, idx, dp)
+	// Same reason as the REST neighborhood: a Calico policy admitted through one
+	// serving group must not advertise the other.
+	topology.ReadvertiseCalicoPolicyNodes(sub.Nodes, func(t topology.SARTuple) bool {
+		return canReadInNamespace(ctx, t.Group, t.Resource, t.Namespace, "get")
+	})
 	if sub.AmbiguousRoot {
 		return nil, nil, fmt.Errorf("resource kind is ambiguous for %s/%s/%s; provide group", input.Kind, input.Namespace, input.Name)
 	}

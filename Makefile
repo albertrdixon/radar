@@ -1,4 +1,5 @@
 .PHONY: build install clean dev frontend backend test test-e2e test-chart lint help restart restart-fe kill watch-backend watch-frontend loadtest
+.PHONY: calico-demo calico-demo-down calico-demo-status
 .PHONY: release release-binaries-dry docker docker-test docker-multiarch docker-push
 .PHONY: desktop desktop-binary desktop-dev desktop-package-darwin desktop-package-windows desktop-package-linux
 
@@ -234,11 +235,16 @@ loadtest: frontend embed
 # Bootstrap a kind cluster pre-loaded with curated Velero fixtures (all 13
 # Backup phases, the supersession series, a paused+invalid Schedule, an
 # unavailable BSL, a restic repository, and the rancher plural collision).
-# The Velero controller is deliberately scaled to 0 — the failure phases
-# cannot be produced without real object storage, so status is written
-# directly. See scripts/velero-demo/README.md for the coverage matrix.
+# The Velero controller is deliberately scaled to 0, so the fixtures' own
+# status survives and all thirteen phases are on screen at once. Run
+# ./scripts/velero-demo.sh live for the other half: MinIO plus a running
+# controller, which earns the states instead of asserting them.
+# See scripts/velero-demo/README.md for the coverage matrix.
 velero-demo:
 	./scripts/velero-demo.sh up
+
+velero-demo-live:
+	./scripts/velero-demo.sh live
 
 velero-demo-down:
 	./scripts/velero-demo.sh down
@@ -265,6 +271,35 @@ cnpg-demo-status:
 # phases and Backup rows are omitted because the controller owns them.
 cnpg-demo-live:
 	./scripts/cnpg-demo.sh live
+
+# Grafana Beyla on kind: eBPF loaded, a minimal Prometheus scraping it, and two
+# conversations to observe. Which labels Beyla exports depends on configuration —
+# dst_port and transport are off by default, direction is on and doubles every
+# edge — so read scripts/beyla-demo/README.md before changing the Beyla source.
+# `attrs` and `no-network` switch between the three configurations that matter.
+beyla-demo:
+	./scripts/beyla-demo.sh up
+
+beyla-demo-down:
+	./scripts/beyla-demo.sh down
+
+beyla-demo-status:
+	./scripts/beyla-demo.sh status
+
+# Bootstrap a kind cluster running real Calico with its aggregated API server,
+# plus the policy shapes the Calico surfaces render (both API groups serving the
+# same objects, all three staged kinds including a staged deletion, a non-default
+# tier, IP pools and a HostEndpoint).
+# See scripts/calico-demo/README.md for the coverage matrix and the two Calico
+# behaviours that are easy to get wrong without a cluster to check against.
+calico-demo:
+	./scripts/calico-demo.sh up
+
+calico-demo-down:
+	./scripts/calico-demo.sh down
+
+calico-demo-status:
+	./scripts/calico-demo.sh status
 
 # Run linter
 lint:
@@ -387,6 +422,10 @@ help:
 	@echo "  make rollouts-demo    - Argo Rollouts progression fixtures"
 	@echo "  make cnpg-demo        - Frozen CNPG rendering fixtures"
 	@echo "  make cnpg-demo-live   - CNPG fixtures with the operator running"
+	@echo "  make velero-demo      - Velero fixtures, all 13 backup phases at once"
+	@echo "  make velero-demo-live - Velero with real object storage; states produced by the controller"
+	@echo "  make beyla-demo       - Grafana Beyla eBPF traffic fixtures"
+	@echo "  make calico-demo      - Real Calico, both API groups, staged policies"
 	@echo ""
 	@echo "Desktop:"
 	@echo "  make desktop                - Build desktop app (frontend + Wails binary)"

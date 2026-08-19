@@ -57,6 +57,8 @@ func main() {
 	namespaces := flag.Int("namespaces", 0, "load-test: number of namespaces to spread apps across (0 = default)")
 	podsPerApp := flag.Int("pods-per-app", 0, "load-test: pods per Deployment/ReplicaSet (0 = default)")
 	adminPort := flag.Int("admin-port", 0, "load-test: admin listener port for live scaling (0 = <port>+1)")
+	censusProfile := flag.String("census", "", "load-test: seed a named census profile (e.g. large-eks) instead of -pods")
+	censusScale := flag.Float64("census-scale", 1.0, "load-test: scale factor applied to -census counts")
 	flag.Parse()
 
 	// Isolate config/settings writes to a temp directory so e2e tests
@@ -74,7 +76,18 @@ func main() {
 		fakeClient *fake.Clientset
 		gen        *loadtest.Generator
 	)
-	if *pods > 0 {
+	if *censusProfile != "" {
+		c, ok := loadtest.Profiles[*censusProfile]
+		if !ok {
+			log.Fatalf("unknown -census profile %q", *censusProfile)
+		}
+		c = c.Scale(*censusScale)
+		start := time.Now()
+		objs := loadtest.CensusObjects(c, "registry.example/app:v1")
+		fakeClient = fake.NewClientset(objs...)
+		fmt.Fprintf(os.Stderr, "Seeding census %q scale %.3f: %d objects (%s)\n",
+			*censusProfile, *censusScale, len(objs), time.Since(start).Round(time.Millisecond))
+	} else if *pods > 0 {
 		gen = loadtest.New(loadtest.Config{
 			Pods: *pods, Nodes: *nodes, Namespaces: *namespaces, PodsPerApp: *podsPerApp,
 		})
@@ -90,7 +103,13 @@ func main() {
 
 	// --- Initialize subsystems ---
 
-	if err := k8s.InitTestResourceCache(fakeClient); err != nil {
+	// The census path measures startup, which only exists when the cache has the
+	// live deferred/critical split; InitTestResourceCache syncs everything at once.
+	if *censusProfile != "" {
+		if err := k8s.InitLoadTestResourceCache(fakeClient); err != nil {
+			log.Fatalf("InitLoadTestResourceCache: %v", err)
+		}
+	} else if err := k8s.InitTestResourceCache(fakeClient); err != nil {
 		log.Fatalf("InitTestResourceCache: %v", err)
 	}
 

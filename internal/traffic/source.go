@@ -23,6 +23,13 @@ type Recommendation = pkgtraffic.Recommendation
 type HelmChartInfo = pkgtraffic.HelmChartInfo
 type SourcesResponse = pkgtraffic.SourcesResponse
 
+// Re-export FlowsResponse.WarningKind values from pkg/traffic.
+const (
+	WarningTransient = pkgtraffic.WarningTransient
+	WarningPartial   = pkgtraffic.WarningPartial
+)
+
 // Re-export functions from pkg/traffic.
 var AggregateFlows = pkgtraffic.AggregateFlows
+var RoundRate = pkgtraffic.RoundRate
 var DefaultFlowOptions = pkgtraffic.DefaultFlowOptions

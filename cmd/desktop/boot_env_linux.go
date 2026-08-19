@@ -6,21 +6,22 @@ import (
 	"log"
 	"os"
 	"strings"
+
+	"github.com/skyhook-io/radar/internal/desktopenv"
 )
 
 // logBootEnv prints Linux desktop environment context at startup so bug
 // reports include the info needed to diagnose Wayland/X11, compositor, and
 // WebKit rendering issues without the reporter having to run extra commands.
+//
+// Users launching from the .desktop entry never see stdout, so the same values
+// are also served in the diagnostics snapshot — see internal/desktopenv.
 func logBootEnv() {
-	session := []string{"XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP", "WAYLAND_DISPLAY", "DISPLAY"}
-	overrides := []string{"GDK_BACKEND", "GSK_RENDERER", "WEBKIT_DISABLE_DMABUF_RENDERER", "WEBKIT_DISABLE_COMPOSITING_MODE", "GTK_THEME"}
-	sandbox := []string{"SNAP", "FLATPAK_ID", "container"}
-
-	log.Printf("[desktop] session: %s", joinEnv(session, true))
-	if s := joinEnv(overrides, false); s != "" {
+	log.Printf("[desktop] session: %s", joinEnv(desktopenv.SessionKeys, true))
+	if s := joinEnv(desktopenv.OverrideKeys, false); s != "" {
 		log.Printf("[desktop] render overrides: %s", s)
 	}
-	if s := joinEnv(sandbox, false); s != "" {
+	if s := joinEnv(desktopenv.SandboxKeys, false); s != "" {
 		log.Printf("[desktop] sandbox: %s", s)
 	}
 }

@@ -1,9 +1,11 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import type {
   PolicyResourceResponse,
   PolicyCoverageResponse,
   PolicyQueuedResponse,
   CNPGCatalogUsersResponse,
+  VeleroStoredBackupsResponse,
+  VeleroRunMessagesResponse,
 } from '@skyhook-io/k8s-ui'
 import { fetchJSON } from './client'
 
@@ -138,5 +140,48 @@ export function useCNPGCatalogUsers(name: string, namespace = '', enabled = true
     enabled: enabled && !!name,
     staleTime: 15000,
     retry: false,
+  })
+}
+
+// /api/velero/backupstoragelocations/{namespace}/{name}/backups
+//
+// The inverse of the location a Backup names. Server-side and RBAC-gated for the
+// same reason as the other reverse lookups: "this location holds nothing" is a
+// sentence someone reads before deciding whether they can still restore, and it
+// must not come from a browsing filter or a lookup that failed.
+export function useVeleroStoredBackups(namespace: string, name: string, enabled = true) {
+  return useQuery<VeleroStoredBackupsResponse>({
+    queryKey: ['velero', 'stored-backups', namespace, name],
+    queryFn: () =>
+      fetchJSON<VeleroStoredBackupsResponse>(
+        `/velero/backupstoragelocations/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/backups`,
+      ),
+    enabled: enabled && !!namespace && !!name,
+    staleTime: 15000,
+    retry: false,
+  })
+}
+
+// POST /api/velero/{kind}/{namespace}/{name}/messages
+//
+// A mutation, like useRevealPodEnvironment — the closest thing this project
+// already has: data that is deliberately not on the object, fetched only when
+// someone asks for it. Reading a run's warnings makes Velero create a
+// DownloadRequest and pulls an object out of storage, which is not work to do on
+// every drawer open. The counts are already there to answer "is anything wrong".
+//
+// Mutation state is not keyed, so it is only correct while the drawer remounts
+// the renderer as the selected resource changes. It does — verified by
+// collapsing the cache key and watching the data still not leak across a switch.
+export function useVeleroRunMessages(kind: 'backups' | 'restores', namespace: string, name: string) {
+  return useMutation<VeleroRunMessagesResponse, Error, void>({
+    mutationFn: () =>
+      fetchJSON<VeleroRunMessagesResponse>(
+        `/velero/${kind}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/messages`,
+        { method: 'POST' },
+      ),
+    // No meta.errorMessage: the failures here are the interesting part — a
+    // stopped controller, a denial, unreachable storage — and each is rendered
+    // in place next to the counts rather than thrown away in a toast.
   })
 }

@@ -1,7 +1,15 @@
-# One Backup per phase in the v1.18 enum - all 13, including the six that
-#   must stay SILENT in Issues (Completed, New, Queued, ReadyToStart,
-#   InProgress, Deleting). A phase here starting to raise an issue is the
-#   regression this file exists to catch.
+# One Backup per phase in the v1.18 enum - all 13.
+#
+# Six raise nothing on the strength of the phase alone: Completed, New, Queued,
+# ReadyToStart, InProgress, Deleting. A phase here raising an issue BECAUSE OF
+# THE PHASE is the regression this file exists to catch.
+#
+# One exception, and it is about age rather than phase: InProgress,
+# WaitingForPluginOperations and Finalizing raise VeleroRunStalled once they have
+# sat longer than Velero allows a single operation. phase-inprogress here starts
+# ~31h ago and is expected to raise it — that is the surface working, not a
+# regression. Deleting is deliberately not in that set: its startTimestamp
+# belongs to the original run, so it can never be timed.
 ---
 apiVersion: velero.io/v1
 kind: Backup

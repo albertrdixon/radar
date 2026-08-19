@@ -16,6 +16,7 @@ import {
   getRestoreIncludedNamespaces,
   getRestoreDuration,
   getRestoreErrors,
+  getRestoreWarnings,
   getScheduleStatus,
   getSchedulePaused,
   getScheduleCronInfo,
@@ -37,6 +38,10 @@ import {
 // whenever the two differ. Without this the three collapsed partial-failure
 // phases would be unreachable outside the YAML tab, and the label would stop
 // being a display choice and start being a loss of information.
+// Foreground colours here carry a light counterpart as well as the dark one.
+// A bare `text-*-400` is tuned for the dark ground and washes out on the light
+// one — the same defect rbac-badges.ts was created to fix, and these cells sit
+// in a table next to badges that already do this correctly.
 export function VeleroPhaseValue({
   status,
   phase,
@@ -84,7 +89,7 @@ export function BackupCell({ resource, column }: { resource: any; column: string
     case 'expiry': {
       const exp = getBackupExpiry(resource)
       const isExpired = exp === 'Expired'
-      return <span className={clsx('text-sm', isExpired ? 'text-red-400' : 'text-theme-text-secondary')}>{exp}</span>
+      return <span className={clsx('text-sm', isExpired ? 'text-red-600 dark:text-red-400' : 'text-theme-text-secondary')}>{exp}</span>
     }
     case 'errors': {
       const errors = getBackupErrors(resource)
@@ -94,9 +99,9 @@ export function BackupCell({ resource, column }: { resource: any; column: string
       }
       return (
         <span className="text-sm">
-          {errors > 0 && <span className="text-red-400">{errors}E</span>}
+          {errors > 0 && <span className="text-red-600 dark:text-red-400">{errors}E</span>}
           {errors > 0 && warnings > 0 && <span className="text-theme-text-tertiary"> / </span>}
-          {warnings > 0 && <span className="text-yellow-400">{warnings}W</span>}
+          {warnings > 0 && <span className="text-amber-600 dark:text-amber-400">{warnings}W</span>}
         </span>
       )
     }
@@ -128,11 +133,21 @@ export function RestoreCell({ resource, column }: { resource: any; column: strin
       return <span className="text-sm text-theme-text-secondary">{dur}</span>
     }
     case 'errors': {
+      // Errors AND warnings, the same shape the Backup column uses. A restore
+      // that reported only warnings showed "-" here while carrying a non-zero
+      // count on the object, which is the row a reader scans to decide whether
+      // the restore is worth opening.
       const errors = getRestoreErrors(resource)
-      if (errors === 0) {
+      const warnings = getRestoreWarnings(resource)
+      if (errors === 0 && warnings === 0) {
         return <span className="text-sm text-theme-text-tertiary">-</span>
       }
-      return <span className="text-sm text-red-400">{errors}</span>
+      return (
+        <span className="text-sm flex gap-1.5">
+          {errors > 0 && <span className="text-red-600 dark:text-red-400">{errors}E</span>}
+          {warnings > 0 && <span className="text-amber-600 dark:text-amber-400">{warnings}W</span>}
+        </span>
+      )
     }
     default:
       return <span className="text-sm text-theme-text-tertiary">-</span>
@@ -157,7 +172,14 @@ export function ScheduleCell({ resource, column }: { resource: any; column: stri
           </span>
           {alsoPaused && (
             <Tooltip content="Also paused — this schedule will not run until it is resumed">
-              <Pause className="w-3 h-3 shrink-0 text-amber-600 dark:text-amber-400" />
+              <>
+                <Pause className="w-3 h-3 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+                {/* The badge beside this says "Rejected", so without a label the
+                    row reads as a schedule that is merely broken rather than one
+                    that is also switched off — and the tooltip carrying that
+                    second fact needs a pointer to reach. */}
+                <span className="sr-only">Also paused — this schedule will not run until it is resumed</span>
+              </>
             </Tooltip>
           )}
         </span>
@@ -271,7 +293,7 @@ export function BackupStorageLocationCell({ resource, column }: { resource: any;
     }
     case 'default': {
       const isDefault = getBSLDefault(resource)
-      return <span className={clsx('text-sm', isDefault ? 'text-blue-400' : 'text-theme-text-tertiary')}>{isDefault ? 'Yes' : '-'}</span>
+      return <span className={clsx('text-sm', isDefault ? 'text-blue-600 dark:text-blue-400' : 'text-theme-text-tertiary')}>{isDefault ? 'Yes' : '-'}</span>
     }
     case 'lastValidation': {
       const lastVal = getBSLLastValidation(resource)

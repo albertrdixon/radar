@@ -1,0 +1,34 @@
+# __NODE__ and __NODE_IP__ are substituted by calico-demo.sh — a HostEndpoint
+# has to name a node that exists on this machine.
+apiVersion: projectcalico.org/v3
+kind: HostEndpoint
+metadata:
+  name: __NODE__-eth0
+  labels:
+    role: control-plane
+spec:
+  node: __NODE__
+  interfaceName: eth0
+  expectedIPs: ["__NODE_IP__"]
+  profiles: ["projectcalico-default-allow"]
+  ports:
+    - name: kubelet
+      port: 10250
+      protocol: TCP
+---
+# A second pool that is disabled and tunnel-only, so the pool list has something
+# to distinguish from the operator's default pool. Disabled pools allocate
+# nothing, so the overlapping-looking CIDR is inert.
+apiVersion: projectcalico.org/v3
+kind: IPPool
+metadata:
+  name: tunnel-only-pool
+spec:
+  cidr: 10.244.0.0/16
+  blockSize: 26
+  ipipMode: Never
+  vxlanMode: Never
+  natOutgoing: false
+  disabled: true
+  nodeSelector: "role == 'worker'"
+  allowedUses: ["Tunnel"]

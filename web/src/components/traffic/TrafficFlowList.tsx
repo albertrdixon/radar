@@ -181,10 +181,24 @@ export function TrafficFlowList({ flows }: TrafficFlowListProps) {
                   </span>
                   </Tooltip>
 
-                  {/* Destination */}
-                  <Tooltip content={flow.destination.namespace ? `${flow.destination.namespace}/${flow.destination.name}` : flow.destination.name} wrapperClassName="min-w-0">
+                  {/* Destination. An unoriented conversation has no caller and no
+                      callee — the two ends are ordered arbitrarily — so it is marked
+                      rather than presented as a direction the source established. */}
+                  <Tooltip
+                    content={
+                      flow.directionUnknown
+                        ? 'Direction unknown: this source could not determine which end opened the conversation'
+                        : flow.destination.namespace
+                          ? `${flow.destination.namespace}/${flow.destination.name}`
+                          : flow.destination.name
+                    }
+                    wrapperClassName="min-w-0"
+                  >
                   <span className="truncate text-theme-text-primary">
                     {flow.destination.name}
+                    {flow.directionUnknown && (
+                      <span className="ml-1 text-theme-text-tertiary">(direction unknown)</span>
+                    )}
                   </span>
                   </Tooltip>
 

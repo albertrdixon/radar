@@ -156,6 +156,9 @@ func (m *Manager) DetectSources(ctx context.Context) (*SourcesResponse, error) {
 	// Check each registered source in deterministic priority order
 	// (hubble has deepest visibility, istio has L7 metrics, caretta is fallback, beyla is external eBPF)
 	sourceOrder := []string{"hubble", "istio", "caretta", "beyla"}
+	// Collected in priority order so the active source can be reconciled against
+	// what is actually available once every source has reported.
+	available := make([]TrafficSource, 0, len(sourceOrder))
 	for _, name := range sourceOrder {
 		source, ok := m.sources[name]
 		if !ok {
@@ -182,14 +185,28 @@ func (m *Manager) DetectSources(ctx context.Context) (*SourcesResponse, error) {
 				Native:  result.Native,
 				Message: result.Message,
 			})
-			// Set first available as active (deterministic priority)
-			if m.activeSource == nil {
-				m.activeSource = source
-			}
+			available = append(available, source)
+		} else if result.Present && result.Message != "" {
+			// Present but unusable — installed with the wrong feature enabled, or
+			// running but not scraped. That is a status with an explanation, which is
+			// what SourceStatus is for and what the error branch above already does;
+			// a bare name in NotDetected would flatten it into "not installed".
+			// Gated on Present so a source nobody installed stays out: the
+			// recommendation covers absence, and a row per uninstalled source would
+			// bury the one with a fixable problem.
+			response.Detected = append(response.Detected, SourceStatus{
+				Name:    name,
+				Status:  "not_found",
+				Version: result.Version,
+				Native:  result.Native,
+				Message: result.Message,
+			})
 		} else {
 			response.NotDetected = append(response.NotDetected, name)
 		}
 	}
+
+	m.reconcileActiveSource(available)
 
 	// Set active source name in response
 	if m.activeSource != nil {
@@ -473,6 +490,28 @@ func (m *Manager) StreamFlows(ctx context.Context, opts FlowOptions) (<-chan Flo
 	}
 
 	return source.StreamFlows(ctx, opts)
+}
+
+// reconcileActiveSource keeps the active source in step with what detection just
+// found. Detection used to only ever promote, so a source that stopped being
+// available stayed active: the sources response then reported it as active and
+// not_found at once, and the flows endpoint answered 200 with an empty graph and
+// no warning to explain it — the same permanently-empty view that requiring data
+// for availability exists to prevent. Clearing it makes the flows endpoint report
+// no source, which is the truth and what a freshly started Radar already says.
+func (m *Manager) reconcileActiveSource(available []TrafficSource) {
+	if m.activeSource != nil {
+		for _, s := range available {
+			if s.Name() == m.activeSource.Name() {
+				return
+			}
+		}
+		log.Printf("[traffic] Active source %s is no longer available", m.activeSource.Name())
+		m.activeSource = nil
+	}
+	if len(available) > 0 {
+		m.activeSource = available[0]
+	}
 }
 
 // SetActiveSource sets the active traffic source by name

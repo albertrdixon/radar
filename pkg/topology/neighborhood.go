@@ -161,7 +161,7 @@ func BuildNeighborhoodWithIndex(t *Topology, root ResourceRef, opts Neighborhood
 	// was inserted last wins in nodeByID). Verify the candidate's apiGroup
 	// matches; otherwise fall through to findNodeByRef which does the
 	// group-aware tuple match.
-	if ok && root.Group != "" && nodeAPIGroupFromData(rootNode) != root.Group {
+	if ok && root.Group != "" && !nodeMatchesAPIGroup(rootNode, root.Group) {
 		ok = false
 	}
 	if !ok {
@@ -398,6 +398,9 @@ func edgeTypesForAuto(rootKind NodeKind) map[EdgeType]bool {
 	// Policies / protectors: who they attach to.
 	case KindNetworkPolicy, KindCiliumNetworkPolicy,
 		KindCiliumClusterwideNetworkPolicy, KindClusterNetworkPolicy,
+		KindCalicoNetworkPolicy, KindCalicoGlobalNetworkPolicy,
+		KindCalicoStagedNetworkPolicy, KindCalicoStagedGlobalNetworkPolicy,
+		KindCalicoStagedKubernetesNetworkPolicy,
 		KindPDB, KindMachineHealthCheck,
 		KindPeerAuthentication, KindAuthorizationPolicy:
 		return policyEdgeTypes()
@@ -451,7 +454,7 @@ func findNodeByRef(nodes []Node, ref ResourceRef) (*Node, bool) {
 			continue
 		}
 		if ref.Group != "" {
-			if nodeAPIGroupFromData(n) != ref.Group {
+			if !nodeMatchesAPIGroup(n, ref.Group) {
 				continue
 			}
 		}
@@ -515,6 +518,19 @@ func pseudoKindFor(kind, group string) string {
 		case "gateway", "gateways":
 			return string(KindIstioGateway)
 		}
+	case "projectcalico.org", "crd.projectcalico.org":
+		switch strings.ToLower(kind) {
+		case "networkpolicy", "networkpolicies", "caliconetworkpolicy":
+			return string(KindCalicoNetworkPolicy)
+		case "globalnetworkpolicy", "globalnetworkpolicies", "calicoglobalnetworkpolicy":
+			return string(KindCalicoGlobalNetworkPolicy)
+		case "stagednetworkpolicy", "stagednetworkpolicies", "calicostagednetworkpolicy":
+			return string(KindCalicoStagedNetworkPolicy)
+		case "stagedglobalnetworkpolicy", "stagedglobalnetworkpolicies", "calicostagedglobalnetworkpolicy":
+			return string(KindCalicoStagedGlobalNetworkPolicy)
+		case "stagedkubernetesnetworkpolicy", "stagedkubernetesnetworkpolicies", "calicostagedkubernetesnetworkpolicy":
+			return string(KindCalicoStagedKubernetesNetworkPolicy)
+		}
 	}
 	return kind
 }
@@ -550,6 +566,31 @@ func APIVersionGroup(apiVersion string) string {
 		}
 	}
 	return ""
+}
+
+// nodeMatchesAPIGroup reports whether a node can be addressed through the given
+// API group. A Calico policy is served by both projectcalico.org and
+// crd.projectcalico.org, and is represented by a single node, so a reference
+// through either group has to resolve to it.
+func nodeMatchesAPIGroup(n *Node, group string) bool {
+	if n == nil {
+		return false
+	}
+	if group == "" {
+		return true
+	}
+	if nodeAPIGroupFromData(n) == group {
+		return true
+	}
+	if !IsCalicoPolicyKind(n.Kind) {
+		return false
+	}
+	for _, served := range calicoNodeAPIGroups(n) {
+		if strings.EqualFold(served, group) {
+			return true
+		}
+	}
+	return false
 }
 
 // nodeAPIGroupFromData extracts the API group from a Node's Data map.

@@ -121,6 +121,14 @@ func Classify(in classifyInput) issuesapi.Category {
 			case "BackupStorageLocation", "VolumeSnapshotLocation", "BackupRepository":
 				return issuesapi.CategoryBackupTargetUnavailable
 			}
+			// A stalled run has not failed — it has no verdict at all, which is
+			// why it needs its own category rather than the failure one. Filed
+			// under backup_failed it renders as "Backup failed" above a message
+			// saying the run is still in progress, and points at the wrong fix:
+			// you look at the controller, not at an error the run never produced.
+			if in.Reason == ReasonVeleroRunStalled {
+				return issuesapi.CategoryBackupStalled
+			}
 			return issuesapi.CategoryBackupFailed
 		case g == "postgresql.cnpg.io":
 			// Only the durability signals are backups. A cluster that is

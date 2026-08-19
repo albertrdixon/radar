@@ -10,6 +10,7 @@ import (
 	"github.com/skyhook-io/radar/internal/app"
 	"github.com/skyhook-io/radar/internal/cloud"
 	"github.com/skyhook-io/radar/internal/config"
+	"github.com/skyhook-io/radar/internal/desktopenv"
 	"github.com/skyhook-io/radar/internal/k8s"
 	"github.com/skyhook-io/radar/internal/updater"
 	versionpkg "github.com/skyhook-io/radar/internal/version"
@@ -26,6 +27,23 @@ import (
 var (
 	version = "dev"
 )
+
+// linuxGPUPolicy is declared once so the value the webview is configured with
+// and the value diagnostics reports can never drift apart.
+const linuxGPUPolicy = linux.WebviewGpuPolicyOnDemand
+
+func gpuPolicyName(p linux.WebviewGpuPolicy) string {
+	switch p {
+	case linux.WebviewGpuPolicyAlways:
+		return "always"
+	case linux.WebviewGpuPolicyOnDemand:
+		return "on-demand"
+	case linux.WebviewGpuPolicyNever:
+		return "never"
+	default:
+		return "unknown"
+	}
+}
 
 func main() {
 	// Load persistent config (~/.radar/config.json) for flag defaults.
@@ -157,6 +175,7 @@ func main() {
 
 	app.SetGlobals(cfg)
 	versionpkg.SetDesktop(true)
+	desktopenv.SetGPUPolicy(gpuPolicyName(linuxGPUPolicy))
 
 	// Clean up leftover files from previous update
 	updater.CleanupOldUpdate()
@@ -244,7 +263,7 @@ func main() {
 
 		Linux: &linux.Options{
 			ProgramName:      "radar",
-			WebviewGpuPolicy: linux.WebviewGpuPolicyOnDemand,
+			WebviewGpuPolicy: linuxGPUPolicy,
 		},
 	})
 

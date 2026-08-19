@@ -1,0 +1,29 @@
+# In a subdirectory on purpose: apply_fixtures kubectl-applies every top-level
+# *.yaml in scripts/velero-demo, and this is a kind config, not a Kubernetes
+# manifest. Alongside the fixtures it is applied to the cluster and `up` fails.
+#
+# One port mapping, and it is load-bearing for `live` mode.
+#
+# Velero serves a backup's error and warning messages by handing out a
+# pre-signed URL to the object store, and whatever asks for those messages then
+# fetches that URL itself. In `live` mode the object store is MinIO inside the
+# cluster, so the URL Velero would naturally sign — http://minio.minio.svc:9000
+# — is meaningless to Radar running on a laptop, and the fetch fails with a DNS
+# error that looks like a bug in Radar.
+#
+# Velero's AWS plugin has `publicUrl` for exactly this: sign the download URLs
+# for a host the *client* can reach, while the controller keeps using the
+# in-cluster one. That host has to actually exist, hence this mapping —
+# localhost:30900 on the laptop reaches the MinIO NodePort inside the cluster,
+# and the pre-signed signature stays valid because the Host header matches what
+# Velero signed for.
+#
+# Harmless in `up` mode, where MinIO is never installed.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30900
+        hostPort: 30900
+        protocol: TCP

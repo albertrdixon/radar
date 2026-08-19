@@ -1,0 +1,58 @@
+# Something for Velero to actually back up.
+#
+# A backup of an empty namespace completes without exercising anything. This is
+# small but real: a Deployment, a Service, a ConfigMap and a Secret, so the
+# backup has items to count and a restore has objects to recreate — and the item
+# counts Radar renders come from work Velero did rather than from a number typed
+# into a fixture.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-app
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: demo-app
+data:
+  greeting: "restored from backup"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-secret
+  namespace: demo-app
+stringData:
+  token: not-a-real-secret
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: demo-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: web }
+  template:
+    metadata:
+      labels: { app: web }
+    spec:
+      containers:
+        - name: web
+          # busybox rather than pause: the stalled-run state is produced by a
+          # real Velero pre-backup hook, and a hook is an exec into this
+          # container. pause has no shell to exec into.
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep infinity"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: demo-app
+spec:
+  selector: { app: web }
+  ports:
+    - { port: 80, targetPort: 80 }

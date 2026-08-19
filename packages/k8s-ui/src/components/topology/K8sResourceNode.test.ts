@@ -8,4 +8,14 @@ describe('baseSubtitle', () => {
     expect(baseSubtitle('ServiceAccount', {})).toBe('Workload identity')
     expect(baseSubtitle('ServiceMonitor', { endpointCount: 1 })).toBe('1 scrape endpoint')
   })
+
+  it('describes a Calico staged deletion as a removal, not as selecting everything', () => {
+    // A staged deletion carries no selector, because the Calico API forbids one.
+    // Falling through to the empty-selector default would label the broadest
+    // possible protection onto a policy that is being taken away.
+    expect(baseSubtitle('CalicoStagedNetworkPolicy', { stagedAction: 'Delete' })).toBe('staged deletion')
+    expect(baseSubtitle('CalicoStagedGlobalNetworkPolicy', { stagedAction: 'Delete' })).toBe('staged deletion')
+    expect(baseSubtitle('CalicoStagedNetworkPolicy', { stagedAction: 'Set', selector: "app == 'web'" })).toBe("app == 'web'")
+    expect(baseSubtitle('CalicoNetworkPolicy', {})).toBe('all workloads')
+  })
 })
