@@ -1089,7 +1089,7 @@ func rolloutWorkloadRefTargets(list []*unstructured.Unstructured) map[string]boo
 	return out
 }
 
-// scaleDown never/progressively leave the referenced Deployment serving real pods, so only an observed zero hides it.
+// Under scaleDown: never/progressively the referenced Deployment keeps serving real pods, so only an observed zero hides it.
 func rolloutSupersedesDeployment(refTargets map[string]bool, d *appsv1.Deployment) bool {
 	return d.Spec.Replicas != nil && *d.Spec.Replicas == 0 && refTargets[d.Namespace+"/"+d.Name]
 }
@@ -1125,10 +1125,16 @@ func rolloutSelector(ro *unstructured.Unstructured, refDep *appsv1.Deployment) *
 			return selector
 		}
 	}
-	if refDep == nil {
+	if refDep == nil || refDep.Spec.Selector == nil {
 		return nil
 	}
-	return refDep.Spec.Selector
+	// Under scaleDown: never both workloads' pods match; only the Rollout's carry the revision hash.
+	owned := refDep.Spec.Selector.DeepCopy()
+	owned.MatchExpressions = append(owned.MatchExpressions, metav1.LabelSelectorRequirement{
+		Key:      rollouts.PodTemplateHashLabel,
+		Operator: metav1.LabelSelectorOpExists,
+	})
+	return owned
 }
 
 // Phase leads replica math: a paused canary is fully available on the stable revision.
@@ -1146,7 +1152,8 @@ func rolloutHealth(ro *unstructured.Unstructured) packages.Health {
 	case "Degraded":
 		return packages.HealthUnhealthy
 	case "Paused":
-		if rolloutPausedByAnalysis(ro) {
+		// A pause suspends the progress deadline, so replica math is the only signal left.
+		if rolloutPausedByAnalysis(ro) || ready < desired {
 			return packages.HealthDegraded
 		}
 		return packages.HealthNeutral
@@ -2334,6 +2341,10 @@ func indexWarningEventsByObject(cache *k8s.ResourceCache, namespaces []string) m
 // selector — no extra API/cache calls.
 func podsForSelector(pods []*corev1.Pod, selector *metav1.LabelSelector) []*corev1.Pod {
 	if selector == nil || len(pods) == 0 {
+		return nil
+	}
+	// An empty selector is labels.Everything() — no workload owns every Pod in its namespace.
+	if len(selector.MatchLabels) == 0 && len(selector.MatchExpressions) == 0 {
 		return nil
 	}
 	sel, err := metav1.LabelSelectorAsSelector(selector)

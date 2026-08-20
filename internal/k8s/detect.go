@@ -1961,25 +1961,6 @@ const (
 	rolloutLookupScopeUnverifiable
 )
 
-// scaledToZeroBackingWorkload reports whether the Service's selector matches a
-// workload (Deployment, StatefulSet, or Argo Rollout) that is intentionally
-// scaled to 0 replicas. Such a Service has no endpoints by design (a disabled
-// managed component, a dormant environment, a KEDA target idled to 0), which is
-// a different - benign - state than a selector that matches nothing in the
-// cluster. Only called on the rare zero-endpoint branch, so the per-Service
-// workload scan is not a hot path.
-//
-// The gate is the workload's CURRENT replicas == 0, never a mere "can scale to
-// 0" capability: a KEDA/Rollout target at replicas>0 with 0 ready pods is a real
-// break and must stay critical. KEDA needs no special case here - it sets its
-// target Deployment/Rollout's replicas to 0 when idle, which the checks below
-// already see; minReplicaCount alone proves nothing about current state.
-//
-// The returned rolloutLookupOutcome is only meaningful when scaledZero=false:
-// it tells the caller HOW the Argo Rollout part of the check ended, because
-// the honest severity depends on whether the gap is about to close (transient
-// - the next poll reads the synced cache) or never will (RBAC denies listing
-// Rollouts on every poll).
 // NestedNumberInt64 reads an integer field from an unstructured object, accepting
 // both the int64 shape (k8s typed decode) and the float64 shape (plain JSON
 // decode) that dynamic-informer objects can carry. A fractional float64 is not a
@@ -2004,6 +1985,25 @@ func NestedNumberInt64(obj map[string]any, fields ...string) (int64, bool) {
 	return 0, false
 }
 
+// scaledToZeroBackingWorkload reports whether the Service's selector matches a
+// workload (Deployment, StatefulSet, or Argo Rollout) that is intentionally
+// scaled to 0 replicas. Such a Service has no endpoints by design (a disabled
+// managed component, a dormant environment, a KEDA target idled to 0), which is
+// a different - benign - state than a selector that matches nothing in the
+// cluster. Only called on the rare zero-endpoint branch, so the per-Service
+// workload scan is not a hot path.
+//
+// The gate is the workload's CURRENT replicas == 0, never a mere "can scale to
+// 0" capability: a KEDA/Rollout target at replicas>0 with 0 ready pods is a real
+// break and must stay critical. KEDA needs no special case here - it sets its
+// target Deployment/Rollout's replicas to 0 when idle, which the checks below
+// already see; minReplicaCount alone proves nothing about current state.
+//
+// The returned rolloutLookupOutcome is only meaningful when scaledZero=false:
+// it tells the caller HOW the Argo Rollout part of the check ended, because
+// the honest severity depends on whether the gap is about to close (transient
+// - the next poll reads the synced cache) or never will (RBAC denies listing
+// Rollouts on every poll).
 func scaledToZeroBackingWorkload(cache *ResourceCache, svc *corev1.Service) (scaledZero bool, outcome rolloutLookupOutcome) {
 	if cache == nil || len(svc.Spec.Selector) == 0 {
 		return false, rolloutLookupConclusive

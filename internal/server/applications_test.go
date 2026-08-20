@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/skyhook-io/radar/pkg/packages"
+	"github.com/skyhook-io/radar/pkg/rollouts"
 	"github.com/skyhook-io/radar/pkg/subject"
 	"github.com/skyhook-io/radar/pkg/topology"
 	appsv1 "k8s.io/api/apps/v1"
@@ -433,6 +434,18 @@ func TestRolloutHealthLeadsWithPhase(t *testing.T) {
 			want: packages.HealthDegraded,
 		},
 		{
+			name: "a pause suspends the progress deadline, so unready replicas are the only signal",
+			spec: map[string]any{"replicas": int64(4)},
+			status: map[string]any{
+				"phase":         "Paused",
+				"readyReplicas": int64(2),
+				"pauseConditions": []any{
+					map[string]any{"reason": "CanaryPauseStep"},
+				},
+			},
+			want: packages.HealthDegraded,
+		},
+		{
 			name:   "scaled to zero is neutral",
 			spec:   map[string]any{"replicas": int64(0)},
 			status: map[string]any{"phase": "Degraded"},
@@ -550,6 +563,36 @@ func TestRolloutSelectorFallsBackToWorkloadRefDeployment(t *testing.T) {
 	selector := rolloutSelector(ro, refDep)
 	if selector == nil || selector.MatchLabels["app"] != "api" {
 		t.Fatalf("rolloutSelector = %+v, want the referenced Deployment selector", selector)
+	}
+	if refDep.Spec.Selector.MatchExpressions != nil {
+		t.Fatalf("rolloutSelector mutated the cached Deployment selector: %+v", refDep.Spec.Selector)
+	}
+
+	// scaleDown: never leaves both workloads' pods under the same matchLabels;
+	// only the Rollout's carry the revision hash.
+	rolloutPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "ro", Labels: map[string]string{
+		"app": "api", rollouts.PodTemplateHashLabel: "68cdbfbf75",
+	}}}
+	deployPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "dep", Labels: map[string]string{
+		"app": "api", "pod-template-hash": "7657dfc9c4",
+	}}}
+	got := podsForSelector([]*corev1.Pod{rolloutPod, deployPod}, selector)
+	if len(got) != 1 || got[0].Name != "ro" {
+		t.Fatalf("podsForSelector matched %d pods, want only the Rollout's", len(got))
+	}
+}
+
+// An empty selector is labels.Everything(); a workload that claimed every Pod in
+// its namespace would report unrelated restarts and crash reasons as its own.
+func TestPodsForSelectorRejectsEmptySelector(t *testing.T) {
+	pods := []*corev1.Pod{
+		{ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "unrelated", Labels: map[string]string{"app": "other"}}},
+	}
+	if got := podsForSelector(pods, &metav1.LabelSelector{}); got != nil {
+		t.Fatalf("podsForSelector(empty) = %v, want no pods", got)
+	}
+	if got := podsForSelector(pods, rolloutSelector(rolloutObj("prod", "api", map[string]any{"selector": map[string]any{}}, nil), nil)); got != nil {
+		t.Fatalf("a Rollout with an empty spec.selector claimed %v", got)
 	}
 }
 
