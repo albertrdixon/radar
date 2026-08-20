@@ -434,31 +434,40 @@ func exposeSources(topo *Topology, targetID string) map[string]bool {
 	return out
 }
 
-// Traffic-shifted Services carry the controller-injected revision hash, which the Rollout's declared template never has.
-func TestBuildResourcesTopology_ServiceExposesRolloutBehindRevisionHash(t *testing.T) {
-	rollout := &unstructured.Unstructured{Object: map[string]any{
+func hashedRollout(name, app, stable, current string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "argoproj.io/v1alpha1",
 		"kind":       "Rollout",
-		"metadata":   map[string]any{"name": "web", "namespace": "prod"},
+		"metadata":   map[string]any{"name": name, "namespace": "prod"},
 		"spec": map[string]any{
 			"replicas": int64(1),
 			"template": map[string]any{
-				"metadata": map[string]any{"labels": map[string]any{"app": "web"}},
+				"metadata": map[string]any{"labels": map[string]any{"app": app}},
 			},
 		},
+		"status": map[string]any{"stableRS": stable, "currentPodHash": current},
 	}}
-	shifted := func(name, app, hash string) *corev1.Service {
-		return &corev1.Service{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "prod"},
-			Spec: corev1.ServiceSpec{Selector: map[string]string{
-				"app": app, rollouts.PodTemplateHashLabel: hash,
-			}},
-		}
+}
+
+func shiftedService(name, app, hash string) *corev1.Service {
+	selector := map[string]string{"app": app}
+	if hash != "" {
+		selector[rollouts.PodTemplateHashLabel] = hash
 	}
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "prod"},
+		Spec:       corev1.ServiceSpec{Selector: selector},
+	}
+}
+
+// Traffic-shifted Services carry the controller-injected revision hash, which the Rollout's declared template never has.
+func TestBuildResourcesTopology_ServiceExposesRolloutBehindRevisionHash(t *testing.T) {
+	rollout := hashedRollout("web", "web", "68cdbfbf75", "7657dfc9c4")
 	provider := &mockProvider{services: []*corev1.Service{
-		shifted("web-active", "web", "68cdbfbf75"),
-		shifted("web-preview", "web", "7657dfc9c4"),
-		shifted("other", "unrelated", "68cdbfbf75"),
+		shiftedService("web-active", "web", "68cdbfbf75"),
+		shiftedService("web-preview", "web", "7657dfc9c4"),
+		shiftedService("other", "unrelated", "68cdbfbf75"),
+		shiftedService("web-stale", "web", "0000000000"),
 	}}
 
 	got := exposeSources(buildWithRollouts(t, provider, rollout), "rollout/prod/web")
@@ -469,6 +478,26 @@ func TestBuildResourcesTopology_ServiceExposesRolloutBehindRevisionHash(t *testi
 	}
 	if got["service/prod/other"] {
 		t.Errorf("a Service selecting different pods must not expose the Rollout; got %v", got)
+	}
+	if got["service/prod/web-stale"] {
+		t.Errorf("a Service naming a revision no Rollout owns must not expose it; got %v", got)
+	}
+}
+
+// Sibling Rollouts sharing a label are told apart by the revision the Service names.
+func TestBuildResourcesTopology_ShiftedServicePicksTheOwningSibling(t *testing.T) {
+	web := hashedRollout("web", "web", "aaaaaaaaaa", "aaaaaaaaaa")
+	exp := hashedRollout("web-exp", "web", "bbbbbbbbbb", "bbbbbbbbbb")
+	exp.Object["spec"].(map[string]any)["template"].(map[string]any)["metadata"].(map[string]any)["labels"] =
+		map[string]any{"app": "web", "variant": "exp"}
+	provider := &mockProvider{services: []*corev1.Service{shiftedService("web-active", "web", "aaaaaaaaaa")}}
+
+	topo := buildWithRollouts(t, provider, web, exp)
+	if got := exposeSources(topo, "rollout/prod/web"); !got["service/prod/web-active"] {
+		t.Errorf("the owning Rollout lost its Service; got %v", got)
+	}
+	if got := exposeSources(topo, "rollout/prod/web-exp"); got["service/prod/web-active"] {
+		t.Errorf("a sibling Rollout claimed a Service naming another revision; got %v", got)
 	}
 }
 

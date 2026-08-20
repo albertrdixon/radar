@@ -1389,3 +1389,28 @@ func TestRolloutReplicasAcceptsFloatShape(t *testing.T) {
 		t.Fatalf("rolloutHealth = %q, want neutral for a scaled-to-zero Rollout", got)
 	}
 }
+
+// A canary surge puts more pods in flight than spec.replicas declares; the row has
+// to read 3/3 like a Deployment's does, never 3/2.
+func TestRolloutReplicasTracksSurgeAndShortfall(t *testing.T) {
+	tests := []struct {
+		name                 string
+		spec, status         map[string]any
+		wantDesired, wantRdy int
+	}{
+		{"canary surge", map[string]any{"replicas": int64(2)},
+			map[string]any{"replicas": int64(3), "readyReplicas": int64(3)}, 3, 3},
+		{"controller absent", map[string]any{"replicas": int64(3)}, map[string]any{}, 3, 0},
+		{"steady state", map[string]any{"replicas": int64(2)},
+			map[string]any{"replicas": int64(2), "readyReplicas": int64(2)}, 2, 2},
+		{"scaled to zero", map[string]any{"replicas": int64(0)}, map[string]any{}, 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			desired, ready := rolloutReplicas(rolloutObj("prod", "api", tt.spec, tt.status))
+			if desired != tt.wantDesired || ready != tt.wantRdy {
+				t.Fatalf("rolloutReplicas = (%d, %d), want (%d, %d)", desired, ready, tt.wantDesired, tt.wantRdy)
+			}
+		})
+	}
+}

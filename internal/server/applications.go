@@ -1109,10 +1109,15 @@ func rolloutPrimaryImage(ro *unstructured.Unstructured, refDep *appsv1.Deploymen
 	return primaryImage(refDep.Spec.Template.Spec.Containers)
 }
 
+// Desired tracks the observed total once it exceeds the declared count, the way a
+// Deployment row reads status.Replicas — a canary surge must not render as 3/2.
 func rolloutReplicas(ro *unstructured.Unstructured) (desired, ready int) {
 	spec, found := k8s.NestedNumberInt64(ro.Object, "spec", "replicas")
 	if !found {
 		spec = 1
+	}
+	if total, ok := k8s.NestedNumberInt64(ro.Object, "status", "replicas"); ok && total > spec {
+		spec = total
 	}
 	got, _ := k8s.NestedNumberInt64(ro.Object, "status", "readyReplicas")
 	return int(spec), int(got)

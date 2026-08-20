@@ -2982,9 +2982,12 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		deploymentsByNS[deploy.Namespace] = append(deploymentsByNS[deploy.Namespace], deploy)
 	}
 	rolloutTemplateLabels := make(map[string]map[string]string, len(rolloutIDs))
+	rolloutRevisionHashes := make(map[string]map[string]bool, len(rolloutIDs))
 	for ns, nsRollouts := range rolloutsByNamespace {
 		for _, rollout := range nsRollouts {
-			rolloutTemplateLabels[ns+"/"+rollout.GetName()] = rolloutPodTemplateLabels(rollout, deploymentsByNS[ns])
+			key := ns + "/" + rollout.GetName()
+			rolloutTemplateLabels[key] = rolloutPodTemplateLabels(rollout, deploymentsByNS[ns])
+			rolloutRevisionHashes[key] = rolloutOwnedRevisionHashes(rollout)
 		}
 	}
 	statefulsetsByNS := make(map[string][]*appsv1.StatefulSet)
@@ -3071,9 +3074,12 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		}
 		// Check Rollouts (if we have any)
 		if hasRollouts {
-			selector := selectorWithoutRolloutHash(svc.Spec.Selector)
+			selector, shiftedTo := splitRolloutHashSelector(svc.Spec.Selector)
 			for _, rollout := range rolloutsByNamespace[svc.Namespace] {
 				key := svc.Namespace + "/" + rollout.GetName()
+				if shiftedTo != "" && !rolloutRevisionHashes[key][shiftedTo] {
+					continue
+				}
 				if !matchesSelector(rolloutTemplateLabels[key], selector) {
 					continue
 				}
@@ -7575,14 +7581,33 @@ func getFluxReadyStatus(status map[string]any) (string, HealthStatus) {
 }
 
 // The controller stamps this hash into shifted Service selectors; the Rollout's declared pod template never carries it.
-func selectorWithoutRolloutHash(selector map[string]string) map[string]string {
-	if _, hashed := selector[rollouts.PodTemplateHashLabel]; !hashed {
-		return selector
+func splitRolloutHashSelector(selector map[string]string) (rest map[string]string, revisionHash string) {
+	revisionHash, hashed := selector[rollouts.PodTemplateHashLabel]
+	if !hashed {
+		return selector, ""
 	}
-	out := make(map[string]string, len(selector)-1)
+	rest = make(map[string]string, len(selector)-1)
 	for k, v := range selector {
 		if k != rollouts.PodTemplateHashLabel {
-			out[k] = v
+			rest[k] = v
+		}
+	}
+	return rest, revisionHash
+}
+
+// A shifted Service names one revision; only the Rollout that owns that hash may claim it.
+func rolloutOwnedRevisionHashes(rollout *unstructured.Unstructured) map[string]bool {
+	out := map[string]bool{}
+	for _, path := range [][]string{
+		{"status", "currentPodHash"},
+		{"status", "stableRS"},
+		{"status", "blueGreen", "activeSelector"},
+		{"status", "blueGreen", "previewSelector"},
+		{"status", "canary", "weights", "canary", "podTemplateHash"},
+		{"status", "canary", "weights", "stable", "podTemplateHash"},
+	} {
+		if hash, _, _ := unstructured.NestedString(rollout.Object, path...); hash != "" {
+			out[hash] = true
 		}
 	}
 	return out
