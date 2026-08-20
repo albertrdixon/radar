@@ -8,6 +8,7 @@ import (
 	"github.com/skyhook-io/radar/pkg/packages"
 	"github.com/skyhook-io/radar/pkg/subject"
 	"github.com/skyhook-io/radar/pkg/topology"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -370,6 +371,186 @@ func TestScaledJobHealthFollowsKedaConditions(t *testing.T) {
 				t.Fatalf("scaledJobHealth = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func rolloutObj(ns, name string, spec, status map[string]any) *unstructured.Unstructured {
+	ro := &unstructured.Unstructured{Object: map[string]any{"spec": spec, "status": status}}
+	ro.SetNamespace(ns)
+	ro.SetName(name)
+	return ro
+}
+
+func TestRolloutHealthLeadsWithPhase(t *testing.T) {
+	tests := []struct {
+		name   string
+		spec   map[string]any
+		status map[string]any
+		want   packages.Health
+	}{
+		{
+			name:   "healthy phase",
+			spec:   map[string]any{"replicas": int64(2)},
+			status: map[string]any{"phase": "Healthy", "readyReplicas": int64(2)},
+			want:   packages.HealthHealthy,
+		},
+		{
+			name:   "degraded phase",
+			spec:   map[string]any{"replicas": int64(2)},
+			status: map[string]any{"phase": "Degraded", "readyReplicas": int64(1)},
+			want:   packages.HealthUnhealthy,
+		},
+		{
+			name: "abort beats a stale phase",
+			spec: map[string]any{"replicas": int64(2)},
+			status: map[string]any{
+				"phase": "Healthy", "abort": true, "readyReplicas": int64(2),
+			},
+			want: packages.HealthUnhealthy,
+		},
+		{
+			name: "canary pause step is a designed gate",
+			spec: map[string]any{"replicas": int64(2)},
+			status: map[string]any{
+				"phase":         "Paused",
+				"readyReplicas": int64(2),
+				"pauseConditions": []any{
+					map[string]any{"reason": "CanaryPauseStep"},
+				},
+			},
+			want: packages.HealthNeutral,
+		},
+		{
+			name: "inconclusive analysis pause needs attention",
+			spec: map[string]any{"replicas": int64(2)},
+			status: map[string]any{
+				"phase":         "Paused",
+				"readyReplicas": int64(2),
+				"pauseConditions": []any{
+					map[string]any{"reason": "InconclusiveAnalysisRun"},
+				},
+			},
+			want: packages.HealthDegraded,
+		},
+		{
+			name:   "scaled to zero is neutral",
+			spec:   map[string]any{"replicas": int64(0)},
+			status: map[string]any{"phase": "Degraded"},
+			want:   packages.HealthNeutral,
+		},
+		{
+			name:   "no phase falls back to replica math",
+			spec:   map[string]any{"replicas": int64(3)},
+			status: map[string]any{"readyReplicas": int64(1)},
+			want:   packages.HealthDegraded,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rolloutHealth(rolloutObj("prod", "api", tt.spec, tt.status)); got != tt.want {
+				t.Fatalf("rolloutHealth = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// An omitted spec.replicas defaults to 1, so an unset Rollout must not read as
+// scaled-to-zero.
+func TestRolloutReplicasDefaultsToOne(t *testing.T) {
+	desired, ready := rolloutReplicas(rolloutObj("prod", "api", map[string]any{}, map[string]any{"readyReplicas": int64(1)}))
+	if desired != 1 || ready != 1 {
+		t.Fatalf("rolloutReplicas = (%d, %d), want (1, 1)", desired, ready)
+	}
+}
+
+func TestRolloutWorkloadRefTargetsOnlyMatchDeployments(t *testing.T) {
+	rollouts := []*unstructured.Unstructured{
+		rolloutObj("prod", "inline", map[string]any{
+			"template": map[string]any{"spec": map[string]any{
+				"containers": []any{map[string]any{"image": "ghcr.io/acme/api:1.0"}},
+			}},
+		}, nil),
+		rolloutObj("prod", "ref", map[string]any{
+			"workloadRef": map[string]any{"kind": "Deployment", "name": "api-target"},
+		}, nil),
+		rolloutObj("prod", "rs-ref", map[string]any{
+			"workloadRef": map[string]any{"kind": "ReplicaSet", "name": "api-rs"},
+		}, nil),
+	}
+
+	targets := rolloutWorkloadRefTargets(rollouts)
+	if !targets["prod/api-target"] {
+		t.Fatalf("workloadRef Deployment target not suppressed: %v", targets)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("rolloutWorkloadRefTargets = %v, want only the Deployment target", targets)
+	}
+}
+
+// scaleDown: never/progressively leave the referenced Deployment serving real
+// pods, so only an observed scale-to-zero hides it behind the Rollout.
+func TestRolloutSupersedesDeploymentOnlyWhenScaledToZero(t *testing.T) {
+	targets := map[string]bool{"prod/api-target": true}
+	replicas := func(n int32) *int32 { return &n }
+
+	tests := []struct {
+		name string
+		dep  *appsv1.Deployment
+		want bool
+	}{
+		{
+			name: "scaled to zero target",
+			dep:  &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "api-target"}, Spec: appsv1.DeploymentSpec{Replicas: replicas(0)}},
+			want: true,
+		},
+		{
+			name: "target still serving",
+			dep:  &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "api-target"}, Spec: appsv1.DeploymentSpec{Replicas: replicas(2)}},
+			want: false,
+		},
+		{
+			name: "unset replicas defaults to one",
+			dep:  &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "api-target"}},
+			want: false,
+		},
+		{
+			name: "unrelated deployment",
+			dep:  &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "other"}, Spec: appsv1.DeploymentSpec{Replicas: replicas(0)}},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rolloutSupersedesDeployment(targets, tt.dep); got != tt.want {
+				t.Fatalf("rolloutSupersedesDeployment = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRolloutSelectorMatchesPods(t *testing.T) {
+	ro := rolloutObj("prod", "api", map[string]any{
+		"selector": map[string]any{"matchLabels": map[string]any{"app": "api"}},
+	}, nil)
+	selector := rolloutSelector(ro)
+	if selector == nil || selector.MatchLabels["app"] != "api" {
+		t.Fatalf("rolloutSelector = %+v, want matchLabels app=api", selector)
+	}
+}
+
+// Rollouts are service/worker workloads, not batch, and carry the argoproj.io
+// group so the UI can disambiguate them from core kinds.
+func TestRolloutWorkloadClassification(t *testing.T) {
+	if got := classifyWorkload("Rollout", nil); got != "worker" {
+		t.Fatalf("classifyWorkload(Rollout, no routes) = %q, want worker", got)
+	}
+	if got := classifyWorkload("Rollout", &appRelationships{Services: []string{"api"}}); got != "service" {
+		t.Fatalf("classifyWorkload(Rollout, with service) = %q, want service", got)
+	}
+	if got := appWorkloadAPIGroup("Rollout"); got != "argoproj.io" {
+		t.Fatalf("appWorkloadAPIGroup(Rollout) = %q, want argoproj.io", got)
 	}
 }
 
