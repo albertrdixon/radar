@@ -26,6 +26,7 @@ import (
 	gitopsinsights "github.com/skyhook-io/radar/pkg/gitops/insights"
 	"github.com/skyhook-io/radar/pkg/health"
 	"github.com/skyhook-io/radar/pkg/packages"
+	"github.com/skyhook-io/radar/pkg/rollouts"
 	"github.com/skyhook-io/radar/pkg/subject"
 	"github.com/skyhook-io/radar/pkg/topology"
 )
@@ -817,8 +818,8 @@ func collectAppWorkloads(ctx context.Context, cache *k8s.ResourceCache, namespac
 	cronJobBatches := cronJobBatchSummaries(cache, namespaces)
 	scaledJobBatches := scaledJobBatchSummaries(cache, namespaces)
 	cronWorkflowBatches := cronWorkflowBatchSummaries(ctx, cache, namespaces)
-	rollouts := listDynamicByNamespacesGroup(ctx, cache, namespaces, "Rollout", "argoproj.io")
-	rolloutRefTargets := rolloutWorkloadRefTargets(rollouts)
+	rolloutList := listDynamicByNamespacesGroup(ctx, cache, namespaces, "Rollout", "argoproj.io")
+	rolloutRefTargets := rolloutWorkloadRefTargets(rolloutList)
 
 	add := func(kind, ns, name string, lbls, anns map[string]string, image string, health packages.Health, ready, desired int, selector *metav1.LabelSelector, batch *appBatchSummary) {
 		pods := podsForSelector(podsByNS[ns], selector)
@@ -967,7 +968,7 @@ func collectAppWorkloads(ctx context.Context, cache *k8s.ResourceCache, namespac
 			}
 		})
 	}
-	addRolloutWorkloads(cache, rollouts, add)
+	addRolloutWorkloads(cache, rolloutList, add)
 	addScaledJobWorkloads(ctx, cache, namespaces, add, scaledJobBatches)
 	addArgoBatchWorkloads(ctx, cache, namespaces, add, cronWorkflowBatches, canListClusterWorkflowTemplates)
 	return out
@@ -1061,23 +1062,26 @@ func addScaledJobWorkloads(ctx context.Context, cache *k8s.ResourceCache, namesp
 			batch = &appBatchSummary{}
 		}
 		add("ScaledJob", sj.GetNamespace(), sj.GetName(), sj.GetLabels(), sj.GetAnnotations(),
-			scaledJobPrimaryImage(sj), batchHealth(batch, scaledJobHealth(sj)), 0, 0, nil, batch)
+			firstContainerImage(sj.Object, "spec", "jobTargetRef", "template", "spec", "containers"), batchHealth(batch, scaledJobHealth(sj)), 0, 0, nil, batch)
 	}
 }
 
-func addRolloutWorkloads(cache *k8s.ResourceCache, rollouts []*unstructured.Unstructured, add addAppWorkloadFunc) {
-	for _, ro := range rollouts {
+func addRolloutWorkloads(cache *k8s.ResourceCache, list []*unstructured.Unstructured, add addAppWorkloadFunc) {
+	depLister := cache.Deployments()
+	for _, ro := range list {
+		var refDep *appsv1.Deployment
+		if name, ok := rolloutWorkloadRefName(ro); ok && depLister != nil {
+			refDep, _ = depLister.Deployments(ro.GetNamespace()).Get(name)
+		}
 		desired, ready := rolloutReplicas(ro)
 		add("Rollout", ro.GetNamespace(), ro.GetName(), ro.GetLabels(), ro.GetAnnotations(),
-			rolloutPrimaryImage(cache, ro), rolloutHealth(ro), ready, desired, rolloutSelector(ro), nil)
+			rolloutPrimaryImage(ro, refDep), rolloutHealth(ro), ready, desired, rolloutSelector(ro, refDep), nil)
 	}
 }
 
-// scaleDown: never/progressively leave the referenced Deployment serving real
-// pods, so suppression keys on the observed replica count, not the reference.
-func rolloutWorkloadRefTargets(rollouts []*unstructured.Unstructured) map[string]bool {
+func rolloutWorkloadRefTargets(list []*unstructured.Unstructured) map[string]bool {
 	out := map[string]bool{}
-	for _, ro := range rollouts {
+	for _, ro := range list {
 		if name, ok := rolloutWorkloadRefName(ro); ok {
 			out[ro.GetNamespace()+"/"+name] = true
 		}
@@ -1085,64 +1089,49 @@ func rolloutWorkloadRefTargets(rollouts []*unstructured.Unstructured) map[string
 	return out
 }
 
+// scaleDown never/progressively leave the referenced Deployment serving real pods, so only an observed zero hides it.
 func rolloutSupersedesDeployment(refTargets map[string]bool, d *appsv1.Deployment) bool {
-	return refTargets[d.Namespace+"/"+d.Name] && d.Spec.Replicas != nil && *d.Spec.Replicas == 0
+	return d.Spec.Replicas != nil && *d.Spec.Replicas == 0 && refTargets[d.Namespace+"/"+d.Name]
 }
 
 func rolloutWorkloadRefName(ro *unstructured.Unstructured) (string, bool) {
-	ref, found, err := unstructured.NestedMap(ro.Object, "spec", "workloadRef")
-	if !found || err != nil {
-		return "", false
-	}
-	if kind, _ := ref["kind"].(string); kind != "Deployment" {
-		return "", false
-	}
-	name, _ := ref["name"].(string)
-	return name, name != ""
+	kind, name, ok := rollouts.WorkloadRef(ro)
+	return name, ok && kind == "Deployment"
 }
 
-func rolloutPrimaryImage(cache *k8s.ResourceCache, ro *unstructured.Unstructured) string {
+func rolloutPrimaryImage(ro *unstructured.Unstructured, refDep *appsv1.Deployment) string {
 	if image := firstContainerImage(ro.Object, "spec", "template", "spec", "containers"); image != "" {
 		return image
 	}
-	name, ok := rolloutWorkloadRefName(ro)
-	if !ok {
+	if refDep == nil {
 		return ""
 	}
-	depLister := cache.Deployments()
-	if depLister == nil {
-		return ""
-	}
-	dep, err := depLister.Deployments(ro.GetNamespace()).Get(name)
-	if err != nil {
-		return ""
-	}
-	return primaryImage(dep.Spec.Template.Spec.Containers)
+	return primaryImage(refDep.Spec.Template.Spec.Containers)
 }
 
 func rolloutReplicas(ro *unstructured.Unstructured) (desired, ready int) {
-	spec, found, _ := unstructured.NestedInt64(ro.Object, "spec", "replicas")
+	spec, found := k8s.NestedNumberInt64(ro.Object, "spec", "replicas")
 	if !found {
 		spec = 1
 	}
-	got, _, _ := unstructured.NestedInt64(ro.Object, "status", "readyReplicas")
+	got, _ := k8s.NestedNumberInt64(ro.Object, "status", "readyReplicas")
 	return int(spec), int(got)
 }
 
-func rolloutSelector(ro *unstructured.Unstructured) *metav1.LabelSelector {
-	raw, found, err := unstructured.NestedMap(ro.Object, "spec", "selector")
-	if !found || err != nil {
+func rolloutSelector(ro *unstructured.Unstructured, refDep *appsv1.Deployment) *metav1.LabelSelector {
+	if raw, found, err := unstructured.NestedMap(ro.Object, "spec", "selector"); found && err == nil {
+		selector := &metav1.LabelSelector{}
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(raw, selector); err == nil {
+			return selector
+		}
+	}
+	if refDep == nil {
 		return nil
 	}
-	selector := &metav1.LabelSelector{}
-	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(raw, selector); err != nil {
-		return nil
-	}
-	return selector
+	return refDep.Spec.Selector
 }
 
-// A paused canary is fully available on the stable revision, so phase leads over
-// replica math; the pause reason separates a designed gate from a stuck analysis.
+// Phase leads replica math: a paused canary is fully available on the stable revision.
 func rolloutHealth(ro *unstructured.Unstructured) packages.Health {
 	desired, ready := rolloutReplicas(ro)
 	if desired == 0 {
@@ -1162,7 +1151,6 @@ func rolloutHealth(ro *unstructured.Unstructured) packages.Health {
 		}
 		return packages.HealthNeutral
 	}
-	// Progressing, or a controller that has not written a phase yet.
 	if ready >= desired {
 		return packages.HealthHealthy
 	}
@@ -1476,10 +1464,6 @@ func workflowHealth(phase string) packages.Health {
 	default:
 		return packages.HealthUnknown
 	}
-}
-
-func scaledJobPrimaryImage(sj *unstructured.Unstructured) string {
-	return firstContainerImage(sj.Object, "spec", "jobTargetRef", "template", "spec", "containers")
 }
 
 func firstContainerImage(obj map[string]any, fields ...string) string {

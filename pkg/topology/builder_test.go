@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	k8score "github.com/skyhook-io/radar/pkg/k8score"
+	"github.com/skyhook-io/radar/pkg/rollouts"
 )
 
 // mockProvider implements ResourceProvider with configurable slices.
@@ -411,11 +412,30 @@ func TestBuildResourcesTopology_ReusesListedRolloutsForServiceEdges(t *testing.T
 	}
 }
 
-// Blue/green and canary Services carry the controller-injected revision hash,
-// which the Rollout's declared template never has. Matching verbatim would leave
-// every traffic-shifted Service unconnected.
+func buildWithRollouts(t *testing.T, provider *mockProvider, ros ...*unstructured.Unstructured) *Topology {
+	t.Helper()
+	topo, err := NewBuilder(provider).WithDynamic(&rolloutDynamicProvider{
+		gvr:      schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "rollouts"},
+		rollouts: ros,
+	}).Build(DefaultBuildOptions())
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+	return topo
+}
+
+func exposeSources(topo *Topology, targetID string) map[string]bool {
+	out := map[string]bool{}
+	for _, edge := range topo.Edges {
+		if edge.Type == EdgeExposes && edge.Target == targetID {
+			out[edge.Source] = true
+		}
+	}
+	return out
+}
+
+// Traffic-shifted Services carry the controller-injected revision hash, which the Rollout's declared template never has.
 func TestBuildResourcesTopology_ServiceExposesRolloutBehindRevisionHash(t *testing.T) {
-	rolloutGVR := schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "rollouts"}
 	rollout := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "argoproj.io/v1alpha1",
 		"kind":       "Rollout",
@@ -427,43 +447,21 @@ func TestBuildResourcesTopology_ServiceExposesRolloutBehindRevisionHash(t *testi
 			},
 		},
 	}}
-	provider := &mockProvider{
-		services: []*corev1.Service{
-			{
-				ObjectMeta: metav1.ObjectMeta{Name: "web-active", Namespace: "prod"},
-				Spec: corev1.ServiceSpec{Selector: map[string]string{
-					"app": "web", "rollouts-pod-template-hash": "68cdbfbf75",
-				}},
-			},
-			{
-				ObjectMeta: metav1.ObjectMeta{Name: "web-preview", Namespace: "prod"},
-				Spec: corev1.ServiceSpec{Selector: map[string]string{
-					"app": "web", "rollouts-pod-template-hash": "7657dfc9c4",
-				}},
-			},
-			{
-				ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "prod"},
-				Spec: corev1.ServiceSpec{Selector: map[string]string{
-					"app": "unrelated", "rollouts-pod-template-hash": "68cdbfbf75",
-				}},
-			},
-		},
-	}
-
-	topo, err := NewBuilder(provider).WithDynamic(&rolloutDynamicProvider{
-		gvr:      rolloutGVR,
-		rollouts: []*unstructured.Unstructured{rollout},
-	}).Build(DefaultBuildOptions())
-	if err != nil {
-		t.Fatalf("Build returned error: %v", err)
-	}
-
-	got := map[string]bool{}
-	for _, edge := range topo.Edges {
-		if edge.Type == EdgeExposes && edge.Target == "rollout/prod/web" {
-			got[edge.Source] = true
+	shifted := func(name, app, hash string) *corev1.Service {
+		return &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "prod"},
+			Spec: corev1.ServiceSpec{Selector: map[string]string{
+				"app": app, rollouts.PodTemplateHashLabel: hash,
+			}},
 		}
 	}
+	provider := &mockProvider{services: []*corev1.Service{
+		shifted("web-active", "web", "68cdbfbf75"),
+		shifted("web-preview", "web", "7657dfc9c4"),
+		shifted("other", "unrelated", "68cdbfbf75"),
+	}}
+
+	got := exposeSources(buildWithRollouts(t, provider, rollout), "rollout/prod/web")
 	for _, want := range []string{"service/prod/web-active", "service/prod/web-preview"} {
 		if !got[want] {
 			t.Errorf("expected %s to expose rollout/prod/web; got %v", want, got)
@@ -474,10 +472,8 @@ func TestBuildResourcesTopology_ServiceExposesRolloutBehindRevisionHash(t *testi
 	}
 }
 
-// A workloadRef Rollout has no template of its own, so the Service selector has
-// to be matched against the referenced Deployment's pod labels.
+// A workloadRef Rollout has no template of its own, so the selector matches against the referenced Deployment.
 func TestBuildResourcesTopology_ServiceExposesWorkloadRefRollout(t *testing.T) {
-	rolloutGVR := schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "rollouts"}
 	rollout := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "argoproj.io/v1alpha1",
 		"kind":       "Rollout",
@@ -504,20 +500,9 @@ func TestBuildResourcesTopology_ServiceExposesWorkloadRefRollout(t *testing.T) {
 		}},
 	}
 
-	topo, err := NewBuilder(provider).WithDynamic(&rolloutDynamicProvider{
-		gvr:      rolloutGVR,
-		rollouts: []*unstructured.Unstructured{rollout},
-	}).Build(DefaultBuildOptions())
-	if err != nil {
-		t.Fatalf("Build returned error: %v", err)
+	if got := exposeSources(buildWithRollouts(t, provider, rollout), "rollout/prod/web"); !got["service/prod/web"] {
+		t.Fatalf("service/prod/web did not expose the workloadRef Rollout; got %v", got)
 	}
-
-	for _, edge := range topo.Edges {
-		if edge.Type == EdgeExposes && edge.Source == "service/prod/web" && edge.Target == "rollout/prod/web" {
-			return
-		}
-	}
-	t.Fatalf("service/prod/web did not expose the workloadRef Rollout; edges=%+v", topo.Edges)
 }
 
 func TestBuildResourcesTopology_ServiceOnlyExposesActiveJobs(t *testing.T) {

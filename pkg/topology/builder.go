@@ -3189,10 +3189,10 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 				for _, cj := range cronjobs {
 					addTarget(cj.Namespace, cj.Spec.JobTemplate.Spec.Template.Labels, cronJobIDs[cj.Namespace+"/"+cj.Name])
 				}
-				for _, rollout := range rolloutsByNamespace {
-					for _, item := range rollout {
-						podLabels, _, _ := unstructured.NestedStringMap(item.Object, "spec", "template", "metadata", "labels")
-						addTarget(item.GetNamespace(), podLabels, rolloutIDs[item.GetNamespace()+"/"+item.GetName()])
+				for _, nsRollouts := range rolloutsByNamespace {
+					for _, item := range nsRollouts {
+						key := item.GetNamespace() + "/" + item.GetName()
+						addTarget(item.GetNamespace(), rolloutTemplateLabels[key], rolloutIDs[key])
 					}
 				}
 			}
@@ -7588,15 +7588,13 @@ func selectorWithoutRolloutHash(selector map[string]string) map[string]string {
 	return out
 }
 
-// A Rollout with spec.workloadRef carries no pod template of its own — it lives
-// on the referenced Deployment.
+// A workloadRef Rollout carries no pod template of its own — it lives on the referenced Deployment.
 func rolloutPodTemplateLabels(rollout *unstructured.Unstructured, nsDeployments []*appsv1.Deployment) map[string]string {
 	if templateLabels, found, _ := unstructured.NestedStringMap(rollout.Object, "spec", "template", "metadata", "labels"); found {
 		return templateLabels
 	}
-	kind, _, _ := unstructured.NestedString(rollout.Object, "spec", "workloadRef", "kind")
-	name, _, _ := unstructured.NestedString(rollout.Object, "spec", "workloadRef", "name")
-	if kind != "Deployment" || name == "" {
+	kind, name, ok := rollouts.WorkloadRef(rollout)
+	if !ok || kind != "Deployment" {
 		return nil
 	}
 	for _, deploy := range nsDeployments {

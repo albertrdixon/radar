@@ -527,12 +527,12 @@ func TestNestedNumberInt64(t *testing.T) {
 		{"string", "3", 0, false},
 	}
 	for _, c := range cases {
-		got, ok := nestedNumberInt64(obj(c.in), "spec", "replicas")
+		got, ok := NestedNumberInt64(obj(c.in), "spec", "replicas")
 		if got != c.want || ok != c.wantOK {
-			t.Errorf("%s: nestedNumberInt64 = (%d,%v), want (%d,%v)", c.name, got, ok, c.want, c.wantOK)
+			t.Errorf("%s: NestedNumberInt64 = (%d,%v), want (%d,%v)", c.name, got, ok, c.want, c.wantOK)
 		}
 	}
-	if _, ok := nestedNumberInt64(map[string]any{"spec": map[string]any{}}, "spec", "replicas"); ok {
+	if _, ok := NestedNumberInt64(map[string]any{"spec": map[string]any{}}, "spec", "replicas"); ok {
 		t.Error("missing field must report not-found")
 	}
 }

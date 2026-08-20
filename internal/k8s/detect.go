@@ -1980,11 +1980,11 @@ const (
 // the honest severity depends on whether the gap is about to close (transient
 // - the next poll reads the synced cache) or never will (RBAC denies listing
 // Rollouts on every poll).
-// nestedNumberInt64 reads an integer field from an unstructured object, accepting
+// NestedNumberInt64 reads an integer field from an unstructured object, accepting
 // both the int64 shape (k8s typed decode) and the float64 shape (plain JSON
 // decode) that dynamic-informer objects can carry. A fractional float64 is not a
 // valid integer and reports not-found.
-func nestedNumberInt64(obj map[string]any, fields ...string) (int64, bool) {
+func NestedNumberInt64(obj map[string]any, fields ...string) (int64, bool) {
 	v, found, err := unstructured.NestedFieldNoCopy(obj, fields...)
 	if err != nil || !found {
 		return 0, false
@@ -2068,7 +2068,7 @@ func scaledToZeroBackingWorkload(cache *ResourceCache, svc *corev1.Service) (sca
 		// tolerantly - unstructured.NestedInt64 alone would miss the float64 shape
 		// and never recognize a scaled-to-zero Rollout, condemning dormancy as an
 		// outage.
-		replicas, found := nestedNumberInt64(r.Object, "spec", "replicas")
+		replicas, found := NestedNumberInt64(r.Object, "spec", "replicas")
 		if !found || replicas != 0 {
 			continue
 		}

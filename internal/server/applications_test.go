@@ -455,8 +455,6 @@ func TestRolloutHealthLeadsWithPhase(t *testing.T) {
 	}
 }
 
-// An omitted spec.replicas defaults to 1, so an unset Rollout must not read as
-// scaled-to-zero.
 func TestRolloutReplicasDefaultsToOne(t *testing.T) {
 	desired, ready := rolloutReplicas(rolloutObj("prod", "api", map[string]any{}, map[string]any{"readyReplicas": int64(1)}))
 	if desired != 1 || ready != 1 {
@@ -488,8 +486,6 @@ func TestRolloutWorkloadRefTargetsOnlyMatchDeployments(t *testing.T) {
 	}
 }
 
-// scaleDown: never/progressively leave the referenced Deployment serving real
-// pods, so only an observed scale-to-zero hides it behind the Rollout.
 func TestRolloutSupersedesDeploymentOnlyWhenScaledToZero(t *testing.T) {
 	targets := map[string]bool{"prod/api-target": true}
 	replicas := func(n int32) *int32 { return &n }
@@ -534,14 +530,29 @@ func TestRolloutSelectorMatchesPods(t *testing.T) {
 	ro := rolloutObj("prod", "api", map[string]any{
 		"selector": map[string]any{"matchLabels": map[string]any{"app": "api"}},
 	}, nil)
-	selector := rolloutSelector(ro)
+	selector := rolloutSelector(ro, nil)
 	if selector == nil || selector.MatchLabels["app"] != "api" {
 		t.Fatalf("rolloutSelector = %+v, want matchLabels app=api", selector)
 	}
 }
 
-// Rollouts are service/worker workloads, not batch, and carry the argoproj.io
-// group so the UI can disambiguate them from core kinds.
+// A workloadRef Rollout has no selector of its own; it belongs to the referenced Deployment.
+func TestRolloutSelectorFallsBackToWorkloadRefDeployment(t *testing.T) {
+	ro := rolloutObj("prod", "api", map[string]any{
+		"workloadRef": map[string]any{"kind": "Deployment", "name": "api-target"},
+	}, nil)
+	refDep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "api-target"},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "api"}},
+		},
+	}
+	selector := rolloutSelector(ro, refDep)
+	if selector == nil || selector.MatchLabels["app"] != "api" {
+		t.Fatalf("rolloutSelector = %+v, want the referenced Deployment selector", selector)
+	}
+}
+
 func TestRolloutWorkloadClassification(t *testing.T) {
 	if got := classifyWorkload("Rollout", nil); got != "worker" {
 		t.Fatalf("classifyWorkload(Rollout, no routes) = %q, want worker", got)
@@ -1321,5 +1332,17 @@ func TestWorkloadClass_MixedComposition(t *testing.T) {
 		if r := rowByName(rows, "shop"); r == nil || r.WorkloadClass != c.want {
 			t.Errorf("%s: WorkloadClass = %v, want %s", c.name, r, c.want)
 		}
+	}
+}
+
+// spec.replicas arrives as float64 when a Rollout enters the dynamic cache via
+// plain JSON decode; a strict int64 read would grade a dormant Rollout unhealthy.
+func TestRolloutReplicasAcceptsFloatShape(t *testing.T) {
+	ro := rolloutObj("prod", "api", map[string]any{"replicas": float64(0)}, map[string]any{})
+	if desired, ready := rolloutReplicas(ro); desired != 0 || ready != 0 {
+		t.Fatalf("rolloutReplicas = (%d, %d), want (0, 0)", desired, ready)
+	}
+	if got := rolloutHealth(ro); got != packages.HealthNeutral {
+		t.Fatalf("rolloutHealth = %q, want neutral for a scaled-to-zero Rollout", got)
 	}
 }
