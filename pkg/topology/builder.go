@@ -20,6 +20,7 @@ import (
 	"github.com/skyhook-io/radar/pkg/health"
 	"github.com/skyhook-io/radar/pkg/karpenter"
 	"github.com/skyhook-io/radar/pkg/perfstats"
+	"github.com/skyhook-io/radar/pkg/rollouts"
 )
 
 // Builder constructs topology graphs from K8s resources
@@ -2980,6 +2981,12 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 	for _, deploy := range deployments {
 		deploymentsByNS[deploy.Namespace] = append(deploymentsByNS[deploy.Namespace], deploy)
 	}
+	rolloutTemplateLabels := make(map[string]map[string]string, len(rolloutIDs))
+	for ns, nsRollouts := range rolloutsByNamespace {
+		for _, rollout := range nsRollouts {
+			rolloutTemplateLabels[ns+"/"+rollout.GetName()] = rolloutPodTemplateLabels(rollout, deploymentsByNS[ns])
+		}
+	}
 	statefulsetsByNS := make(map[string][]*appsv1.StatefulSet)
 	for _, sts := range statefulsets {
 		statefulsetsByNS[sts.Namespace] = append(statefulsetsByNS[sts.Namespace], sts)
@@ -3064,30 +3071,22 @@ func (b *Builder) buildResourcesTopology(opts BuildOptions) (*Topology, error) {
 		}
 		// Check Rollouts (if we have any)
 		if hasRollouts {
+			selector := selectorWithoutRolloutHash(svc.Spec.Selector)
 			for _, rollout := range rolloutsByNamespace[svc.Namespace] {
-				spec, _, _ := unstructured.NestedMap(rollout.Object, "spec", "template", "metadata")
-				if spec != nil {
-					if podLabels, ok := spec["labels"].(map[string]any); ok {
-						// Convert map[string]any to map[string]string for matching
-						strLabels := make(map[string]string)
-						for k, v := range podLabels {
-							if s, ok := v.(string); ok {
-								strLabels[k] = s
-							}
-						}
-						if matchesSelector(strLabels, svc.Spec.Selector) {
-							rolloutID := rolloutIDs[rollout.GetNamespace()+"/"+rollout.GetName()]
-							if rolloutID != "" {
-								edges = append(edges, Edge{
-									ID:     fmt.Sprintf("%s-to-%s", svcID, rolloutID),
-									Source: svcID,
-									Target: rolloutID,
-									Type:   EdgeExposes,
-								})
-							}
-						}
-					}
+				key := svc.Namespace + "/" + rollout.GetName()
+				if !matchesSelector(rolloutTemplateLabels[key], selector) {
+					continue
 				}
+				rolloutID := rolloutIDs[key]
+				if rolloutID == "" {
+					continue
+				}
+				edges = append(edges, Edge{
+					ID:     fmt.Sprintf("%s-to-%s", svcID, rolloutID),
+					Source: svcID,
+					Target: rolloutID,
+					Type:   EdgeExposes,
+				})
 			}
 		}
 		// Check Jobs
@@ -7573,6 +7572,39 @@ func getFluxReadyStatus(status map[string]any) (string, HealthStatus) {
 		}
 	}
 	return "Unknown", StatusUnknown
+}
+
+// The controller stamps this hash into shifted Service selectors; the Rollout's declared pod template never carries it.
+func selectorWithoutRolloutHash(selector map[string]string) map[string]string {
+	if _, hashed := selector[rollouts.PodTemplateHashLabel]; !hashed {
+		return selector
+	}
+	out := make(map[string]string, len(selector)-1)
+	for k, v := range selector {
+		if k != rollouts.PodTemplateHashLabel {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// A Rollout with spec.workloadRef carries no pod template of its own — it lives
+// on the referenced Deployment.
+func rolloutPodTemplateLabels(rollout *unstructured.Unstructured, nsDeployments []*appsv1.Deployment) map[string]string {
+	if templateLabels, found, _ := unstructured.NestedStringMap(rollout.Object, "spec", "template", "metadata", "labels"); found {
+		return templateLabels
+	}
+	kind, _, _ := unstructured.NestedString(rollout.Object, "spec", "workloadRef", "kind")
+	name, _, _ := unstructured.NestedString(rollout.Object, "spec", "workloadRef", "name")
+	if kind != "Deployment" || name == "" {
+		return nil
+	}
+	for _, deploy := range nsDeployments {
+		if deploy.Name == name {
+			return deploy.Spec.Template.ObjectMeta.Labels
+		}
+	}
+	return nil
 }
 
 func matchesSelector(labels, selector map[string]string) bool {

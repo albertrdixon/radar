@@ -411,6 +411,115 @@ func TestBuildResourcesTopology_ReusesListedRolloutsForServiceEdges(t *testing.T
 	}
 }
 
+// Blue/green and canary Services carry the controller-injected revision hash,
+// which the Rollout's declared template never has. Matching verbatim would leave
+// every traffic-shifted Service unconnected.
+func TestBuildResourcesTopology_ServiceExposesRolloutBehindRevisionHash(t *testing.T) {
+	rolloutGVR := schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "rollouts"}
+	rollout := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "argoproj.io/v1alpha1",
+		"kind":       "Rollout",
+		"metadata":   map[string]any{"name": "web", "namespace": "prod"},
+		"spec": map[string]any{
+			"replicas": int64(1),
+			"template": map[string]any{
+				"metadata": map[string]any{"labels": map[string]any{"app": "web"}},
+			},
+		},
+	}}
+	provider := &mockProvider{
+		services: []*corev1.Service{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "web-active", Namespace: "prod"},
+				Spec: corev1.ServiceSpec{Selector: map[string]string{
+					"app": "web", "rollouts-pod-template-hash": "68cdbfbf75",
+				}},
+			},
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "web-preview", Namespace: "prod"},
+				Spec: corev1.ServiceSpec{Selector: map[string]string{
+					"app": "web", "rollouts-pod-template-hash": "7657dfc9c4",
+				}},
+			},
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "prod"},
+				Spec: corev1.ServiceSpec{Selector: map[string]string{
+					"app": "unrelated", "rollouts-pod-template-hash": "68cdbfbf75",
+				}},
+			},
+		},
+	}
+
+	topo, err := NewBuilder(provider).WithDynamic(&rolloutDynamicProvider{
+		gvr:      rolloutGVR,
+		rollouts: []*unstructured.Unstructured{rollout},
+	}).Build(DefaultBuildOptions())
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, edge := range topo.Edges {
+		if edge.Type == EdgeExposes && edge.Target == "rollout/prod/web" {
+			got[edge.Source] = true
+		}
+	}
+	for _, want := range []string{"service/prod/web-active", "service/prod/web-preview"} {
+		if !got[want] {
+			t.Errorf("expected %s to expose rollout/prod/web; got %v", want, got)
+		}
+	}
+	if got["service/prod/other"] {
+		t.Errorf("a Service selecting different pods must not expose the Rollout; got %v", got)
+	}
+}
+
+// A workloadRef Rollout has no template of its own, so the Service selector has
+// to be matched against the referenced Deployment's pod labels.
+func TestBuildResourcesTopology_ServiceExposesWorkloadRefRollout(t *testing.T) {
+	rolloutGVR := schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "rollouts"}
+	rollout := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "argoproj.io/v1alpha1",
+		"kind":       "Rollout",
+		"metadata":   map[string]any{"name": "web", "namespace": "prod"},
+		"spec": map[string]any{
+			"replicas":    int64(1),
+			"workloadRef": map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "name": "web-target"},
+		},
+	}}
+	zero := int32(0)
+	provider := &mockProvider{
+		deployments: []*appsv1.Deployment{{
+			ObjectMeta: metav1.ObjectMeta{Name: "web-target", Namespace: "prod"},
+			Spec: appsv1.DeploymentSpec{
+				Replicas: &zero,
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "web"}},
+				},
+			},
+		}},
+		services: []*corev1.Service{{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "prod"},
+			Spec:       corev1.ServiceSpec{Selector: map[string]string{"app": "web"}},
+		}},
+	}
+
+	topo, err := NewBuilder(provider).WithDynamic(&rolloutDynamicProvider{
+		gvr:      rolloutGVR,
+		rollouts: []*unstructured.Unstructured{rollout},
+	}).Build(DefaultBuildOptions())
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+
+	for _, edge := range topo.Edges {
+		if edge.Type == EdgeExposes && edge.Source == "service/prod/web" && edge.Target == "rollout/prod/web" {
+			return
+		}
+	}
+	t.Fatalf("service/prod/web did not expose the workloadRef Rollout; edges=%+v", topo.Edges)
+}
+
 func TestBuildResourcesTopology_ServiceOnlyExposesActiveJobs(t *testing.T) {
 	selector := map[string]string{"app": "api"}
 	provider := &mockProvider{
